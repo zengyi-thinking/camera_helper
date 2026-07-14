@@ -25,8 +25,11 @@
 #define ALGO_BEACON_VLAMP_SMALL_RATIO          (1.45f)
 #define ALGO_BEACON_VLAMP_SMALL_AXIS           (1.60f)
 #define ALGO_BEACON_VLAMP_SMALL_SPARSE_FILL    (0.42f)
-#define ALGO_BEACON_EDGE_MARGIN           (16U)
-#define ALGO_BEACON_Y_EDGE_MARGIN         (34U)
+#define ALGO_BEACON_EDGE_MARGIN           (20U)
+#define ALGO_BEACON_EDGE_RETRY_FACTOR     (0.42f)
+#define ALGO_BEACON_EDGE_RETRY_ADD        (26.0f)
+#define ALGO_BEACON_EDGE_RETRY_MIN        (80.0f)
+#define ALGO_BEACON_EDGE_RETRY_MAX        (190.0f)
 #define ALGO_BEACON_FAR_RADIUS            (5)
 #define ALGO_BEACON_FAR_CORE_RADIUS       (1)
 #define ALGO_BEACON_FAR_AREA_MAX          (18U)
@@ -124,12 +127,6 @@ static uint8 algo_beacon_near_edge(uint16 x, uint16 y)
             || ((y + ALGO_BEACON_EDGE_MARGIN) >= (MT9V03X_H - 1U))) ? 1U : 0U;
 }
 
-static uint8 algo_beacon_near_y_edge(uint16 y)
-{
-    return ((y <= ALGO_BEACON_Y_EDGE_MARGIN)
-            || ((y + ALGO_BEACON_Y_EDGE_MARGIN) >= (MT9V03X_H - 1U))) ? 1U : 0U;
-}
-
 static uint8 algo_beacon_in_ignore_rect(uint16 x, uint16 y)
 {
     if(s_ignore_enabled == 0U)
@@ -171,7 +168,7 @@ static void algo_beacon_reset_flicker(void)
     s_flicker_confirmed = 0U;
 }
 
-static void algo_beacon_build_binary(const uint8 *src_image)
+static void algo_beacon_build_binary(const uint8 *src_image, uint8 edge_retry)
 {
     uint32 sum = 0U;
     uint8 gray_max = 0U;
@@ -203,10 +200,23 @@ static void algo_beacon_build_binary(const uint8 *src_image)
     if(threshold > 220.0f) { threshold = 220.0f; }
     s_threshold_center = algo_beacon_clamp_u8(threshold);
 
-    threshold = (float)gray_max * 0.30f;
-    if((mean + 18.0f) > threshold) { threshold = mean + 18.0f; }
-    if(threshold < 58.0f) { threshold = 58.0f; }
-    if(threshold > 155.0f) { threshold = 155.0f; }
+    if(edge_retry != 0U)
+    {
+        threshold = (float)gray_max * ALGO_BEACON_EDGE_RETRY_FACTOR;
+        if((mean + ALGO_BEACON_EDGE_RETRY_ADD) > threshold)
+        {
+            threshold = mean + ALGO_BEACON_EDGE_RETRY_ADD;
+        }
+        if(threshold < ALGO_BEACON_EDGE_RETRY_MIN) { threshold = ALGO_BEACON_EDGE_RETRY_MIN; }
+        if(threshold > ALGO_BEACON_EDGE_RETRY_MAX) { threshold = ALGO_BEACON_EDGE_RETRY_MAX; }
+    }
+    else
+    {
+        threshold = (float)gray_max * 0.30f;
+        if((mean + 18.0f) > threshold) { threshold = mean + 18.0f; }
+        if(threshold < 58.0f) { threshold = 58.0f; }
+        if(threshold > 155.0f) { threshold = 155.0f; }
+    }
     s_threshold_edge = algo_beacon_clamp_u8(threshold);
 
     for(y = 0U; y < MT9V03X_H; y++)
@@ -423,7 +433,8 @@ static uint8 algo_beacon_blob_valid(algo_beacon_candidate_t *candidate)
      * blob 不应进入信标候选；圆润柔光信标会保留。 */
     if((long_side >= ALGO_BEACON_VLAMP_SMALL_LONG)
        && (candidate->area >= ALGO_BEACON_VLAMP_SMALL_AREA)
-       && ((candidate->edge_near == 0U) || (candidate->area >= 28U) || (long_side >= 13U))
+       && ((candidate->edge_near == 0U)
+           || ((candidate->area >= 30U) && (long_side >= 13U)))
        && ((candidate->ratio >= ALGO_BEACON_VLAMP_SMALL_RATIO)
            || (candidate->axis_ratio >= ALGO_BEACON_VLAMP_SMALL_AXIS)
            || ((candidate->fill <= ALGO_BEACON_VLAMP_SMALL_SPARSE_FILL)
@@ -527,7 +538,6 @@ static uint8 algo_beacon_collect_far_point(const uint8 *src_image,
     uint16 max_y = 0U;
     uint16 long_side;
     uint8 edge_near;
-    uint8 y_edge;
     float contrast_score;
     float peak_score;
     float area_score;
@@ -541,21 +551,12 @@ static uint8 algo_beacon_collect_far_point(const uint8 *src_image,
 
     peak = src_image[(uint32)cy * MT9V03X_W + cx];
     edge_near = algo_beacon_near_edge(cx, cy);
-    y_edge = algo_beacon_near_y_edge(cy);
-    if(y_edge != 0U)
+    if(edge_near != 0U)
     {
-        peak_min = 48U;
-        contrast_min = 11.0f;
-        score_min = 0.32f;
-        threshold_factor = 0.32f;
-        threshold_add = 4.0f;
-    }
-    else if(edge_near != 0U)
-    {
-        peak_min = 54U;
-        contrast_min = 13.0f;
-        score_min = 0.36f;
-        threshold_factor = 0.35f;
+        peak_min = 50U;
+        contrast_min = 12.0f;
+        score_min = 0.34f;
+        threshold_factor = 0.34f;
         threshold_add = 5.0f;
     }
     else
@@ -679,14 +680,16 @@ static uint8 algo_beacon_collect_far_point(const uint8 *src_image,
     return 1U;
 }
 
-static uint8 algo_beacon_detect_blob(const uint8 *src_image, algo_beacon_candidate_t *best_out)
+static uint8 algo_beacon_detect_blob(const uint8 *src_image,
+                                     uint8 edge_retry,
+                                     algo_beacon_candidate_t *best_out)
 {
     uint16 x;
     uint16 y;
     uint8 found = 0U;
 
     memset(best_out, 0, sizeof(*best_out));
-    algo_beacon_build_binary(src_image);
+    algo_beacon_build_binary(src_image, edge_retry);
 
     for(y = 0U; y < MT9V03X_H; y++)
     {
@@ -727,7 +730,7 @@ static uint8 algo_beacon_detect_far(const uint8 *src_image, algo_beacon_candidat
     {
         for(x = 0U; x < MT9V03X_W; x++)
         {
-            uint8 peak_min = algo_beacon_near_y_edge(y) ? 48U : (algo_beacon_near_edge(x, y) ? 54U : 64U);
+            uint8 peak_min = (algo_beacon_near_edge(x, y) != 0U) ? 50U : 64U;
             if(src_image[(uint32)y * MT9V03X_W + x] < peak_min)
             {
                 continue;
@@ -977,8 +980,14 @@ void algo_beacon_process(const uint8 *src_image)
         return;
     }
 
-    blob_found = algo_beacon_detect_blob(src_image, &blob_candidate);
+    blob_found = algo_beacon_detect_blob(src_image, 0U, &blob_candidate);
     far_found = algo_beacon_detect_far(src_image, &far_candidate);
+    if((blob_found == 0U) && (far_found == 0U))
+    {
+        /* 低边缘阈值可能把灯核与背景连成大块。仅在首轮完全失败时，
+         * 用较高边缘阈值再分割一次；中心区阈值和形状规则保持不变。 */
+        blob_found = algo_beacon_detect_blob(src_image, 1U, &blob_candidate);
+    }
 
     if((blob_found != 0U) && (far_found != 0U))
     {
@@ -1004,6 +1013,7 @@ void algo_beacon_process(const uint8 *src_image)
     if((s_hold_left > 0U) && (s_last_result.found != 0U))
     {
         s_result = s_last_result;
+        s_result.hold_active = 1U;
         if((s_result.zone_flags & ALGO_BEACON_ZONE_FLAG_PERIOD_CONFIRMED) == 0U)
         {
             /* 未确认信标 hold 期间渐进衰减: 第1帧压到340, 之后每帧再降40,

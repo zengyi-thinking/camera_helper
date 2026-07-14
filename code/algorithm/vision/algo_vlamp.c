@@ -24,11 +24,15 @@
 #define ALGO_VLAMP_PLATE_AXIS_MIN        (1.32f)
 #define ALGO_VLAMP_PLATE_SPARSE_FILL_MAX (0.46f)
 #define ALGO_VLAMP_TRACK_DIST_MAX_PX     (50.0f)
-#define ALGO_VLAMP_HOLD_FRAMES           (10U)
-#define ALGO_VLAMP_ROI_MARGIN_PX         (26U)
-#define ALGO_VLAMP_ROI_CENTER_MAX_PX     (36.0f)
-#define ALGO_VLAMP_ROI_AREA_MIN          (10U)
-#define ALGO_VLAMP_ROI_CONF              (360U)
+#define ALGO_VLAMP_HOLD_FRAMES           (5U)
+#define ALGO_VLAMP_BRIGHT_REF_RANK       (12U)
+#define ALGO_VLAMP_OUTLINE_LONG_MIN      (10U)
+#define ALGO_VLAMP_OUTLINE_AREA_MIN      (12U)
+#define ALGO_VLAMP_OUTLINE_STRONG_MIN    (4U)
+#define ALGO_VLAMP_OUTLINE_SKEW_MIN      (0.16f)
+#define ALGO_VLAMP_RECOVER_MARGIN_PX     (16U)
+#define ALGO_VLAMP_RECOVER_CENTER_MAX_PX (28.0f)
+#define ALGO_VLAMP_RECOVER_CONF_MIN      (320U)
 
 typedef struct
 {
@@ -46,6 +50,10 @@ typedef struct
     float sum_xx;
     float sum_yy;
     float sum_xy;
+    float sum_xxx;
+    float sum_yyy;
+    float sum_xxy;
+    float sum_xyy;
     float center_x;
     float center_y;
     float fill;
@@ -220,6 +228,98 @@ static uint8 algo_vlamp_blob_plate_like(const algo_vlamp_blob_t *blob)
     return 0U;
 }
 
+/* A small edge-clipped V can look compact, but it still carries a bright,
+ * slightly stretched or sparse outline. This only admits a candidate; the
+ * group-level taper check below remains the final V-versus-beacon gate. */
+static uint8 algo_vlamp_blob_outline_seed_like(const algo_vlamp_blob_t *blob)
+{
+    uint16 w;
+    uint16 h;
+    uint16 long_side;
+
+    if((blob == 0) || (blob->valid == 0U))
+    {
+        return 0U;
+    }
+
+    w = (uint16)(blob->max_x - blob->min_x + 1U);
+    h = (uint16)(blob->max_y - blob->min_y + 1U);
+    long_side = algo_vlamp_long_side(w, h);
+    if((long_side < ALGO_VLAMP_OUTLINE_LONG_MIN)
+       || (blob->area < ALGO_VLAMP_OUTLINE_AREA_MIN)
+       || (blob->strong_area < ALGO_VLAMP_OUTLINE_STRONG_MIN))
+    {
+        return 0U;
+    }
+
+    return (((blob->fill <= 0.58f)
+             && ((blob->ratio >= 1.10f) || (blob->axis_ratio >= 1.16f)))
+            || (blob->fill <= 0.38f)) ? 1U : 0U;
+}
+
+/* A V or hook has a narrow end and a wider end along its principal axis.
+ * A round beacon halo is close to symmetric, so its projected skew is small. */
+static float algo_vlamp_shape_taper(float center_x,
+                                    float center_y,
+                                    float heading_x,
+                                    float heading_y,
+                                    float lambda1,
+                                    float area,
+                                    float sum_xx,
+                                    float sum_yy,
+                                    float sum_xy,
+                                    float sum_xxx,
+                                    float sum_yyy,
+                                    float sum_xxy,
+                                    float sum_xyy)
+{
+    float inv_area;
+    float exx;
+    float eyy;
+    float exy;
+    float exxx;
+    float eyyy;
+    float exxy;
+    float exyy;
+    float muxxx;
+    float muyyy;
+    float muxxy;
+    float muxyy;
+    float projected;
+    float denom;
+
+    if((area < 1.0f) || (lambda1 < 0.10f))
+    {
+        return 0.0f;
+    }
+
+    inv_area = 1.0f / area;
+    exx = sum_xx * inv_area;
+    eyy = sum_yy * inv_area;
+    exy = sum_xy * inv_area;
+    exxx = sum_xxx * inv_area;
+    eyyy = sum_yyy * inv_area;
+    exxy = sum_xxy * inv_area;
+    exyy = sum_xyy * inv_area;
+    muxxx = exxx - (3.0f * center_x * exx) + (2.0f * center_x * center_x * center_x);
+    muyyy = eyyy - (3.0f * center_y * eyy) + (2.0f * center_y * center_y * center_y);
+    muxxy = exxy - (center_y * exx) - (2.0f * center_x * exy)
+           + (2.0f * center_x * center_x * center_y);
+    muxyy = exyy - (center_x * eyy) - (2.0f * center_y * exy)
+           + (2.0f * center_x * center_y * center_y);
+    projected = (heading_x * heading_x * heading_x * muxxx)
+              + (3.0f * heading_x * heading_x * heading_y * muxxy)
+              + (3.0f * heading_x * heading_y * heading_y * muxyy)
+              + (heading_y * heading_y * heading_y * muyyy);
+    denom = lambda1 * sqrtf(lambda1);
+    if(denom < 0.001f)
+    {
+        return 0.0f;
+    }
+
+    return fabsf(projected) / denom;
+}
+
 static void algo_vlamp_finish_blob(algo_vlamp_blob_t *blob)
 {
     uint16 w;
@@ -315,6 +415,10 @@ static void algo_vlamp_accum_blob(algo_vlamp_blob_t *blob, uint16 x, uint16 y, u
     blob->sum_xx += (float)x * (float)x;
     blob->sum_yy += (float)y * (float)y;
     blob->sum_xy += (float)x * (float)y;
+    blob->sum_xxx += (float)x * (float)x * (float)x;
+    blob->sum_yyy += (float)y * (float)y * (float)y;
+    blob->sum_xxy += (float)x * (float)x * (float)y;
+    blob->sum_xyy += (float)x * (float)y * (float)y;
     blob->sum_gray += gray;
     if(gray > blob->peak) { blob->peak = gray; }
     if(gray >= s_threshold_strong) { blob->strong_area++; }
@@ -323,13 +427,18 @@ static void algo_vlamp_accum_blob(algo_vlamp_blob_t *blob, uint16 x, uint16 y, u
 static void algo_vlamp_build_binary(const uint8 *src_image)
 {
     uint32 sum = 0U;
+    uint16 histogram[256];
     uint8 gray_max = 0U;
+    uint8 bright_ref = 0U;
     float mean;
     float threshold;
     uint16 x;
     uint16 y;
+    int16 gray;
+    uint16 ranked_count = 0U;
 
     memset(s_binary, 0, sizeof(s_binary));
+    memset(histogram, 0, sizeof(histogram));
     if(src_image == 0)
     {
         return;
@@ -341,20 +450,32 @@ static void algo_vlamp_build_binary(const uint8 *src_image)
         {
             uint8 gray = src_image[(uint32)y * MT9V03X_W + x];
             sum += gray;
+            if(histogram[gray] < 65535U) { histogram[gray]++; }
             if(gray > gray_max) { gray_max = gray; }
         }
     }
 
     mean = (float)sum / ((float)MT9V03X_W * (float)MT9V03X_H);
-    threshold = (float)gray_max * 0.70f;
-    if((mean + 20.0f) > threshold) { threshold = mean + 20.0f; }
-    if(threshold < 70.0f) { threshold = 70.0f; }
+    for(gray = 255; gray >= 0; gray--)
+    {
+        ranked_count = (uint16)(ranked_count + histogram[gray]);
+        if(ranked_count >= ALGO_VLAMP_BRIGHT_REF_RANK)
+        {
+            bright_ref = (uint8)gray;
+            break;
+        }
+    }
+    if(bright_ref == 0U) { bright_ref = gray_max; }
+
+    threshold = (float)bright_ref * 0.68f;
+    if((mean + 18.0f) > threshold) { threshold = mean + 18.0f; }
+    if(threshold < 65.0f) { threshold = 65.0f; }
     if(threshold > 210.0f) { threshold = 210.0f; }
     s_threshold_low = algo_vlamp_clamp_u8(threshold);
 
-    threshold = (float)gray_max * 0.86f;
-    if((mean + 45.0f) > threshold) { threshold = mean + 45.0f; }
-    if(threshold < 100.0f) { threshold = 100.0f; }
+    threshold = (float)bright_ref * 0.84f;
+    if((mean + 40.0f) > threshold) { threshold = mean + 40.0f; }
+    if(threshold < 95.0f) { threshold = 95.0f; }
     if(threshold > 235.0f) { threshold = 235.0f; }
     s_threshold_strong = algo_vlamp_clamp_u8(threshold);
 
@@ -481,7 +602,8 @@ static float algo_vlamp_seed_score(const algo_vlamp_blob_t *blob)
        || ((algo_vlamp_blob_compact(blob) != 0U)
            && (algo_vlamp_blob_deformed_vlike(blob) == 0U)
            && (algo_vlamp_blob_split_part_like(blob) == 0U)
-           && (plate_like == 0U)))
+           && (plate_like == 0U)
+           && (algo_vlamp_blob_outline_seed_like(blob) == 0U)))
     {
         return 0.0f;
     }
@@ -516,6 +638,35 @@ static float algo_vlamp_seed_score(const algo_vlamp_blob_t *blob)
     return score;
 }
 
+/* The connected-component scan is raster ordered. Keep the most V-like
+ * candidates instead of letting early environmental dots fill the fixed pool. */
+static float algo_vlamp_blob_priority(const algo_vlamp_blob_t *blob)
+{
+    uint16 w;
+    uint16 h;
+    uint16 long_side;
+    float priority;
+
+    if((blob == 0) || (blob->valid == 0U))
+    {
+        return 0.0f;
+    }
+
+    w = (uint16)(blob->max_x - blob->min_x + 1U);
+    h = (uint16)(blob->max_y - blob->min_y + 1U);
+    long_side = algo_vlamp_long_side(w, h);
+    priority = (algo_vlamp_clamp_float((float)long_side / 42.0f, 0.0f, 1.0f) * 0.34f)
+             + (algo_vlamp_clamp_float((float)blob->area / 260.0f, 0.0f, 1.0f) * 0.20f)
+             + (algo_vlamp_clamp_float((float)blob->strong_area / 24.0f, 0.0f, 1.0f) * 0.26f)
+             + (algo_vlamp_clamp_float((blob->axis_ratio - 1.0f) / 2.5f, 0.0f, 1.0f) * 0.14f)
+             + (algo_vlamp_clamp_float((0.74f - blob->fill) / 0.60f, 0.0f, 1.0f) * 0.06f);
+    if(algo_vlamp_blob_outline_seed_like(blob) != 0U)
+    {
+        priority += 0.10f;
+    }
+    return priority;
+}
+
 static void algo_vlamp_group_result(const algo_vlamp_blob_t blobs[],
                                     uint8 blob_count,
                                     uint8 seed,
@@ -536,6 +687,10 @@ static void algo_vlamp_group_result(const algo_vlamp_blob_t blobs[],
     float sum_xx = 0.0f;
     float sum_yy = 0.0f;
     float sum_xy = 0.0f;
+    float sum_xxx = 0.0f;
+    float sum_yyy = 0.0f;
+    float sum_xxy = 0.0f;
+    float sum_xyy = 0.0f;
     float mx;
     float my;
     float var_x;
@@ -555,8 +710,10 @@ static void algo_vlamp_group_result(const algo_vlamp_blob_t blobs[],
     float fill;
     float ratio;
     float axis_ratio;
+    float outline_taper;
     float score;
     uint8 plate_like;
+    uint8 outline_like;
     uint8 selected_count = 0U;
 
     memset(result_out, 0, sizeof(*result_out));
@@ -572,7 +729,8 @@ static void algo_vlamp_group_result(const algo_vlamp_blob_t blobs[],
                || ((algo_vlamp_blob_compact(&blobs[i]) != 0U)
                    && (algo_vlamp_blob_deformed_vlike(&blobs[i]) == 0U)
                    && (algo_vlamp_blob_split_part_like(&blobs[i]) == 0U)
-                   && (algo_vlamp_blob_plate_like(&blobs[i]) == 0U)))
+                   && (algo_vlamp_blob_plate_like(&blobs[i]) == 0U)
+                   && (algo_vlamp_blob_outline_seed_like(&blobs[i]) == 0U)))
             {
                 continue;
             }
@@ -606,6 +764,10 @@ static void algo_vlamp_group_result(const algo_vlamp_blob_t blobs[],
         sum_xx += blobs[i].sum_xx;
         sum_yy += blobs[i].sum_yy;
         sum_xy += blobs[i].sum_xy;
+        sum_xxx += blobs[i].sum_xxx;
+        sum_yyy += blobs[i].sum_yyy;
+        sum_xxy += blobs[i].sum_xxy;
+        sum_xyy += blobs[i].sum_xyy;
     }
 
     if((area == 0U) || (area > ALGO_VLAMP_AREA_MAX))
@@ -638,19 +800,6 @@ static void algo_vlamp_group_result(const algo_vlamp_blob_t blobs[],
                       || ((fill <= ALGO_VLAMP_PLATE_SPARSE_FILL_MAX)
                           && ((ratio >= 1.12f) || (axis_ratio >= 1.18f))))) ? 1U : 0U;
 
-    if((long_side < ALGO_VLAMP_MIN_LONG_SIDE)
-       || ((selected_count <= 1U) && (long_side < 14U))
-       || ((long_side <= ALGO_VLAMP_COMPACT_LONG_MAX)
-           && (fill >= ALGO_VLAMP_COMPACT_FILL_MIN)
-           && (ratio <= ALGO_VLAMP_COMPACT_RATIO_MAX)
-           && (selected_count <= 1U)
-           && (s_track_valid == 0U)
-           && (plate_like == 0U)))
-    {
-        *score_out = 0.0f;
-        return;
-    }
-
     if(fabsf(cov_xy) > 0.001f)
     {
         hx = cov_xy;
@@ -676,15 +825,53 @@ static void algo_vlamp_group_result(const algo_vlamp_blob_t blobs[],
     hx /= norm;
     hy /= norm;
 
+    outline_taper = algo_vlamp_shape_taper(mx,
+                                            my,
+                                            hx,
+                                            hy,
+                                            lambda1,
+                                            (float)area,
+                                            sum_xx,
+                                            sum_yy,
+                                            sum_xy,
+                                            sum_xxx,
+                                            sum_yyy,
+                                            sum_xxy,
+                                            sum_xyy);
+    outline_like = ((long_side >= ALGO_VLAMP_OUTLINE_LONG_MIN)
+                    && (area >= ALGO_VLAMP_OUTLINE_AREA_MIN)
+                    && (strong_area >= ALGO_VLAMP_OUTLINE_STRONG_MIN)
+                    && ((outline_taper >= ALGO_VLAMP_OUTLINE_SKEW_MIN)
+                        || ((selected_count > 1U)
+                            && ((ratio >= 1.10f) || (axis_ratio >= 1.16f))))) ? 1U : 0U;
+
+    if((long_side < ALGO_VLAMP_MIN_LONG_SIDE)
+       || ((selected_count <= 1U) && (long_side < 14U) && (outline_like == 0U))
+       || ((long_side <= ALGO_VLAMP_COMPACT_LONG_MAX)
+           && (fill >= ALGO_VLAMP_COMPACT_FILL_MIN)
+           && (ratio <= ALGO_VLAMP_COMPACT_RATIO_MAX)
+           && (selected_count <= 1U)
+           && (plate_like == 0U)
+           && (outline_like == 0U)))
+    {
+        *score_out = 0.0f;
+        return;
+    }
+
     score = (algo_vlamp_clamp_float(((float)area - 8.0f) / 320.0f, 0.0f, 1.0f) * 0.22f)
           + (algo_vlamp_clamp_float(((float)long_side - 8.0f) / 42.0f, 0.0f, 1.0f) * 0.26f)
           + (algo_vlamp_clamp_float((axis_ratio - 1.10f) / 2.8f, 0.0f, 1.0f) * 0.22f)
           + (algo_vlamp_clamp_float((float)strong_area / 24.0f, 0.0f, 1.0f) * 0.14f)
           + (algo_vlamp_clamp_float((0.82f - fill) / 0.70f, 0.0f, 1.0f) * 0.10f)
-          + ((selected_count > 1U) ? 0.06f : 0.0f);
+          + ((selected_count > 1U) ? 0.06f : 0.0f)
+          + (algo_vlamp_clamp_float((outline_taper - 0.08f) / 0.52f, 0.0f, 1.0f) * 0.12f);
     if(plate_like != 0U)
     {
         score += 0.08f;
+    }
+    if(outline_like != 0U)
+    {
+        score += 0.06f;
     }
 
     if(s_track_valid != 0U)
@@ -698,7 +885,7 @@ static void algo_vlamp_group_result(const algo_vlamp_blob_t blobs[],
         }
     }
 
-    if(score < ((plate_like != 0U) ? 0.29f : 0.34f))
+    if(score < ((plate_like != 0U) ? 0.29f : ((outline_like != 0U) ? 0.30f : 0.34f)))
     {
         *score_out = 0.0f;
         return;
@@ -723,6 +910,7 @@ static void algo_vlamp_group_result(const algo_vlamp_blob_t blobs[],
 static uint8 algo_vlamp_detect_main(const uint8 *src_image, algo_vlamp_result_t *result_out)
 {
     algo_vlamp_blob_t blobs[ALGO_VLAMP_MAX_BLOBS];
+    float blob_priority[ALGO_VLAMP_MAX_BLOBS];
     uint8 blob_count = 0U;
     uint8 i;
     uint16 x;
@@ -731,6 +919,7 @@ static uint8 algo_vlamp_detect_main(const uint8 *src_image, algo_vlamp_result_t 
     algo_vlamp_result_t best_result;
 
     memset(blobs, 0, sizeof(blobs));
+    memset(blob_priority, 0, sizeof(blob_priority));
     memset(&best_result, 0, sizeof(best_result));
     algo_vlamp_build_binary(src_image);
 
@@ -743,10 +932,29 @@ static uint8 algo_vlamp_detect_main(const uint8 *src_image, algo_vlamp_result_t 
                 algo_vlamp_blob_t blob;
                 if(algo_vlamp_collect_component(src_image, x, y, &blob) != 0U)
                 {
+                    float priority = algo_vlamp_blob_priority(&blob);
                     if(blob_count < ALGO_VLAMP_MAX_BLOBS)
                     {
                         blobs[blob_count] = blob;
+                        blob_priority[blob_count] = priority;
                         blob_count++;
+                    }
+                    else
+                    {
+                        uint8 worst = 0U;
+                        uint8 candidate_index;
+                        for(candidate_index = 1U; candidate_index < ALGO_VLAMP_MAX_BLOBS; candidate_index++)
+                        {
+                            if(blob_priority[candidate_index] < blob_priority[worst])
+                            {
+                                worst = candidate_index;
+                            }
+                        }
+                        if(priority > blob_priority[worst])
+                        {
+                            blobs[worst] = blob;
+                            blob_priority[worst] = priority;
+                        }
                     }
                 }
             }
@@ -781,47 +989,70 @@ static uint8 algo_vlamp_detect_main(const uint8 *src_image, algo_vlamp_result_t 
     return 1U;
 }
 
-static uint8 algo_vlamp_detect_roi_hold(const uint8 *src_image, algo_vlamp_result_t *result_out)
+static void algo_vlamp_recenter_stable_bbox(algo_vlamp_result_t *result,
+                                            float center_x,
+                                            float center_y)
 {
+    int32 x0;
+    int32 y0;
+    uint16 bbox_w;
+    uint16 bbox_h;
+
+    if(result == 0)
+    {
+        return;
+    }
+
+    bbox_w = (result->bbox_w > 0U) ? result->bbox_w : 1U;
+    bbox_h = (result->bbox_h > 0U) ? result->bbox_h : 1U;
+    center_x = algo_vlamp_clamp_float(center_x, 0.0f, (float)(MT9V03X_W - 1U));
+    center_y = algo_vlamp_clamp_float(center_y, 0.0f, (float)(MT9V03X_H - 1U));
+    x0 = (int32)(center_x - (((float)bbox_w - 1.0f) * 0.5f) + 0.5f);
+    y0 = (int32)(center_y - (((float)bbox_h - 1.0f) * 0.5f) + 0.5f);
+    if(x0 < 0) { x0 = 0; }
+    if(y0 < 0) { y0 = 0; }
+    if(x0 > (int32)(MT9V03X_W - bbox_w)) { x0 = (int32)(MT9V03X_W - bbox_w); }
+    if(y0 > (int32)(MT9V03X_H - bbox_h)) { y0 = (int32)(MT9V03X_H - bbox_h); }
+    result->center_x = center_x;
+    result->center_y = center_y;
+    result->bbox_x = (uint16)x0;
+    result->bbox_y = (uint16)y0;
+    result->bbox_w = bbox_w;
+    result->bbox_h = bbox_h;
+}
+
+static uint8 algo_vlamp_detect_local_recovery(const uint8 *src_image,
+                                               algo_vlamp_result_t *result_out)
+{
+    algo_vlamp_blob_t blobs[16];
+    algo_vlamp_result_t best_result;
+    uint8 blob_count = 0U;
+    uint8 i;
     uint16 x0;
     uint16 y0;
     uint16 x1;
     uint16 y1;
     uint16 x;
     uint16 y;
-    uint8 peak = 0U;
     uint32 sum = 0U;
-    uint32 count = 0U;
+    uint32 pixel_count = 0U;
+    uint8 peak = 0U;
     float mean;
-    uint8 threshold;
-    uint32 area = 0U;
-    uint32 sum_x = 0U;
-    uint32 sum_y = 0U;
-    uint16 min_x = MT9V03X_W;
-    uint16 min_y = MT9V03X_H;
-    uint16 max_x = 0U;
-    uint16 max_y = 0U;
-    uint16 bbox_w;
-    uint16 bbox_h;
-    uint16 long_side;
-    uint16 short_side;
-    float fill;
-    float ratio;
-    float cx;
-    float cy;
-    float dx;
-    float dy;
-    float dist;
+    float threshold;
+    float best_score = 0.0f;
 
-    if((src_image == 0) || (result_out == 0) || (s_track_valid == 0U) || (s_hold_left == 0U))
+    if((src_image == 0) || (result_out == 0)
+       || (s_track_valid == 0U) || (s_hold_left == 0U))
     {
         return 0U;
     }
 
-    x0 = (s_last_main.bbox_x > ALGO_VLAMP_ROI_MARGIN_PX) ? (uint16)(s_last_main.bbox_x - ALGO_VLAMP_ROI_MARGIN_PX) : 0U;
-    y0 = (s_last_main.bbox_y > ALGO_VLAMP_ROI_MARGIN_PX) ? (uint16)(s_last_main.bbox_y - ALGO_VLAMP_ROI_MARGIN_PX) : 0U;
-    x1 = (uint16)(s_last_main.bbox_x + s_last_main.bbox_w + ALGO_VLAMP_ROI_MARGIN_PX);
-    y1 = (uint16)(s_last_main.bbox_y + s_last_main.bbox_h + ALGO_VLAMP_ROI_MARGIN_PX);
+    x0 = (s_last_main.bbox_x > ALGO_VLAMP_RECOVER_MARGIN_PX)
+       ? (uint16)(s_last_main.bbox_x - ALGO_VLAMP_RECOVER_MARGIN_PX) : 0U;
+    y0 = (s_last_main.bbox_y > ALGO_VLAMP_RECOVER_MARGIN_PX)
+       ? (uint16)(s_last_main.bbox_y - ALGO_VLAMP_RECOVER_MARGIN_PX) : 0U;
+    x1 = (uint16)(s_last_main.bbox_x + s_last_main.bbox_w + ALGO_VLAMP_RECOVER_MARGIN_PX);
+    y1 = (uint16)(s_last_main.bbox_y + s_last_main.bbox_h + ALGO_VLAMP_RECOVER_MARGIN_PX);
     if(x1 >= MT9V03X_W) { x1 = (uint16)(MT9V03X_W - 1U); }
     if(y1 >= MT9V03X_H) { y1 = (uint16)(MT9V03X_H - 1U); }
 
@@ -831,63 +1062,79 @@ static uint8 algo_vlamp_detect_roi_hold(const uint8 *src_image, algo_vlamp_resul
         {
             uint8 gray = src_image[(uint32)y * MT9V03X_W + x];
             sum += gray;
-            count++;
+            pixel_count++;
             if(gray > peak) { peak = gray; }
         }
     }
-    if((count == 0U) || (peak < 50U))
+    if((pixel_count == 0U) || (peak < 50U))
     {
         return 0U;
     }
 
-    mean = (float)sum / (float)count;
-    threshold = algo_vlamp_clamp_u8(algo_vlamp_clamp_float(((float)peak * 0.44f) > (mean + 8.0f)
-                                                           ? ((float)peak * 0.44f)
-                                                           : (mean + 8.0f),
-                                                           32.0f,
-                                                           180.0f));
+    mean = (float)sum / (float)pixel_count;
+    threshold = (float)peak * 0.62f;
+    if((mean + 10.0f) > threshold) { threshold = mean + 10.0f; }
+    s_threshold_low = algo_vlamp_clamp_u8(algo_vlamp_clamp_float(threshold, 58.0f, 190.0f));
+    threshold = (float)peak * 0.82f;
+    if((mean + 28.0f) > threshold) { threshold = mean + 28.0f; }
+    s_threshold_strong = algo_vlamp_clamp_u8(algo_vlamp_clamp_float(threshold, 88.0f, 235.0f));
+
+    memset(s_binary, 0, sizeof(s_binary));
+    memset(blobs, 0, sizeof(blobs));
+    memset(&best_result, 0, sizeof(best_result));
+    for(y = y0; y <= y1; y++)
+    {
+        for(x = x0; x <= x1; x++)
+        {
+            if(src_image[(uint32)y * MT9V03X_W + x] >= s_threshold_low)
+            {
+                s_binary[y][x] = 1U;
+            }
+        }
+    }
 
     for(y = y0; y <= y1; y++)
     {
         for(x = x0; x <= x1; x++)
         {
-            if(src_image[(uint32)y * MT9V03X_W + x] >= threshold)
+            if(s_binary[y][x] == 1U)
             {
-                area++;
-                sum_x += x;
-                sum_y += y;
-                if(x < min_x) { min_x = x; }
-                if(x > max_x) { max_x = x; }
-                if(y < min_y) { min_y = y; }
-                if(y > max_y) { max_y = y; }
+                algo_vlamp_blob_t blob;
+                if((algo_vlamp_collect_component(src_image, x, y, &blob) != 0U)
+                   && (blob_count < 16U))
+                {
+                    blobs[blob_count] = blob;
+                    blob_count++;
+                }
             }
         }
     }
 
-    if(area < ALGO_VLAMP_ROI_AREA_MIN)
+    for(i = 0U; i < blob_count; i++)
     {
-        return 0U;
+        float seed_score = algo_vlamp_seed_score(&blobs[i]);
+        algo_vlamp_result_t candidate;
+        float candidate_score = 0.0f;
+        float dx;
+        float dy;
+        float distance;
+        if(seed_score <= 0.0f) { continue; }
+        algo_vlamp_group_result(blobs, blob_count, i, &candidate, &candidate_score);
+        if(candidate.found == 0U) { continue; }
+        dx = candidate.center_x - s_last_main.center_x;
+        dy = candidate.center_y - s_last_main.center_y;
+        distance = sqrtf((dx * dx) + (dy * dy));
+        candidate_score += seed_score * 0.15f;
+        if((distance <= ALGO_VLAMP_RECOVER_CENTER_MAX_PX)
+           && (candidate.confidence_permille >= ALGO_VLAMP_RECOVER_CONF_MIN)
+           && (candidate_score > best_score))
+        {
+            best_score = candidate_score;
+            best_result = candidate;
+        }
     }
 
-    bbox_w = (uint16)(max_x - min_x + 1U);
-    bbox_h = (uint16)(max_y - min_y + 1U);
-    long_side = algo_vlamp_long_side(bbox_w, bbox_h);
-    short_side = algo_vlamp_short_side(bbox_w, bbox_h);
-    fill = (float)area / ((float)bbox_w * (float)bbox_h);
-    ratio = (short_side > 0U) ? ((float)long_side / (float)short_side) : 999.0f;
-    cx = (float)sum_x / (float)area;
-    cy = (float)sum_y / (float)area;
-    dx = cx - s_last_main.center_x;
-    dy = cy - s_last_main.center_y;
-    dist = sqrtf((dx * dx) + (dy * dy));
-
-    if(dist > ALGO_VLAMP_ROI_CENTER_MAX_PX)
-    {
-        return 0U;
-    }
-
-    if((long_side <= 16U) && (fill >= 0.55f) && (ratio <= 1.45f)
-       && !((long_side >= ALGO_VLAMP_DEFORMED_LONG_MIN) && (area >= ALGO_VLAMP_DEFORMED_AREA_MIN)))
+    if(best_result.found == 0U)
     {
         return 0U;
     }
@@ -895,14 +1142,9 @@ static uint8 algo_vlamp_detect_roi_hold(const uint8 *src_image, algo_vlamp_resul
     *result_out = s_last_main;
     result_out->found = 1U;
     result_out->hold_active = 1U;
-    result_out->center_x = cx;
-    result_out->center_y = cy;
-    result_out->bbox_x = min_x;
-    result_out->bbox_y = min_y;
-    result_out->bbox_w = bbox_w;
-    result_out->bbox_h = bbox_h;
-    result_out->area = (area > 65535U) ? 65535U : (uint16)area;
-    result_out->confidence_permille = ALGO_VLAMP_ROI_CONF;
+    result_out->area = best_result.area;
+    result_out->confidence_permille = best_result.confidence_permille;
+    algo_vlamp_recenter_stable_bbox(result_out, best_result.center_x, best_result.center_y);
     return 1U;
 }
 
@@ -933,7 +1175,7 @@ void algo_vlamp_process(const uint8 *src_image)
         return;
     }
 
-    if(algo_vlamp_detect_roi_hold(src_image, &result) != 0U)
+    if(algo_vlamp_detect_local_recovery(src_image, &result) != 0U)
     {
         s_result = result;
         if(s_hold_left > 0U) { s_hold_left--; }

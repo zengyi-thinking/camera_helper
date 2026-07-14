@@ -10,6 +10,7 @@ extern "C" {
 typedef struct
 {
     uint8_t found;
+    uint8_t hold_active;   /* 1 when the low-level detector reuses its previous result after a miss */
     uint8_t source;
     uint8_t zone_flags;
     float center_x;
