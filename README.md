@@ -77,9 +77,17 @@ Flags:
 
 The main board should use this result only when the main camera cannot publish a beacon and the auxiliary response has `MOVE_VALID=1`.
 
+## Timed Auto-Land Mission Compatibility
+
+The `codex/timed-auto-land` branch intentionally keeps the helper firmware single-target and protocol-compatible. B1/B2 framing and local V/beacon detection are unchanged; the main camera alone owns the two-candidate queue and target lock, while CM7_1 owns the 70-second landing timer. During a live lock, helper data may only support the same mapped target, and it is not allowed to replace a target after the main mission enters its near/missing phase.
+
+Do not add B3, global target IDs, a lamp counter, or a second helper-side target to this mission version. All three devices still need the matching mission branch flashed because the flight controller shared-memory version and the car A4 flag behavior changed.
+
 ## Build
 
 ```bat
 cd /d D:\CYT4BB7_Library\Example\Motherboard_Demo\camera_helper
 iar\build_only.bat
 ```
+
+Verified on `codex/timed-auto-land`: CM7_0 and CM7_1 both build with `0 errors / 0 warnings`.
