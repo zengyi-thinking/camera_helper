@@ -12,7 +12,7 @@ static void app_uart_service(uart_index_enum uart_index)
 
     while(uart_query_byte(uart_index, &byte) != 0U)
     {
-        if(uart_index == UART_1)
+        if(uart_index == UART_6)
         {
             app_camera_helper_on_byte(byte);
         }
@@ -49,12 +49,12 @@ void uart0_isr(void)
     }
 }
 
-void uart1_isr(void) { app_uart_service(UART_1); }
+void uart1_isr(void) { (void)uart_isr_mask(UART_1); }
 void uart2_isr(void) { (void)uart_isr_mask(UART_2); }
 void uart3_isr(void) { (void)uart_isr_mask(UART_3); }
 void uart4_isr(void) { (void)uart_isr_mask(UART_4); }
 void uart5_isr(void) { (void)uart_isr_mask(UART_5); }
-void uart6_isr(void) { (void)uart_isr_mask(UART_6); }
+void uart6_isr(void) { app_uart_service(UART_6); }
 
 void gpio_0_exti_isr(void)  { }
 void gpio_1_exti_isr(void)  { }

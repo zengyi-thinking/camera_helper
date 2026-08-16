@@ -1864,12 +1864,51 @@
                     <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_beacon.h</name>
                 </file>
                 <file>
+                    <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_beacon_activity.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_beacon_activity.h</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_onelamp.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_onelamp.h</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_vision_target.h</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_vision_target_detector.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_vision_target_detector.h</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_vision_target_pipeline.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_vision_target_pipeline.h</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_vision_target_policy.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_vision_target_policy.h</name>
+                </file>
+                <file>
                     <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_vlamp.c</name>
                 </file>
                 <file>
                     <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_vlamp.h</name>
                 </file>
             </group>
+        </group>
+        <group>
+            <name>hardware</name>
+            <file>
+                <name>$PROJ_DIR$\..\..\code\hardware\hw_config.h</name>
+            </file>
         </group>
     </group>
     <group>

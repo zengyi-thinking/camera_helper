@@ -8,12 +8,13 @@ Auxiliary camera board for side-view visual assistance. The board captures MT9V0
 - Display: IPS200 SPI.
 - Main-board link: `UART_6`.
 - Pins: `TX=P03_1`, `RX=P03_0`.
-- Baud rate: `115200`.
+- Baud rate: `230400`.
 
 ## Source Layout
 
 - `code/application/camera_helper/app_camera_helper.*`: capture, display, UART request/response, V/B fusion.
 - `code/algorithm/vision/algo_vlamp.*`: V-lamp detection.
+- `code/algorithm/vision/algo_onelamp.*`: optional cable-occlusion-tolerant ONE-lamp detection.
 - `code/algorithm/vision/algo_beacon.*`: beacon detection.
 - `iar/build_only.bat`: build entry only.
 
@@ -21,10 +22,16 @@ Auxiliary camera board for side-view visual assistance. The board captures MT9V0
 
 Each camera frame runs in this order:
 
-1. Detect V-lamp with `algo_vlamp_process()`.
-2. Detect beacon with the V-lamp bbox used as an ignore rect.
-3. Reject beacon candidates that overlap the V-lamp or look like V-lamp fragments.
-4. If both targets are valid, compute V-to-beacon deltas.
+1. Run the same `algo_vision_target_pipeline_update()` Module used by `flight_control`.
+2. Detect the V-lamp with strict measurement, bright fallback, local recovery and short hold.
+3. Detect and filter up to three beacon candidates with the same V-lamp conflict policy.
+4. Use `target_control` and `beacon_publish` as the helper link result.
+5. If both published targets are valid, compute V-to-beacon deltas.
+
+`code/hardware/hw_config.h` uses `HW_VISION_TARGET_SHAPE_V`, matching the main
+camera. The algorithm source files in `code/algorithm/vision/` are synchronized
+with `flight_control`; do not tune one camera copy without synchronizing the
+other.
 
 The display shows:
 
@@ -75,11 +82,21 @@ Flags:
 - `bit3 FRESH`: response data is recent.
 - `bit4 MAPPED_VALID`: mapped VB delta is valid.
 
-The main board should use this result only when the main camera cannot publish a beacon and the auxiliary response has `MOVE_VALID=1`.
+The main board requests this result as soon as either the main V-lamp or main
+beacon is not freshly visible. The existing safe-use rule remains: a helper
+beacon enters the main image frame only when the main V-lamp is available and
+the auxiliary response has `MOVE_VALID=1`, because the two cameras do not have
+an absolute extrinsic calibration.
 
 ## Timed Auto-Land Mission Compatibility
 
-The `codex/timed-auto-land` branch intentionally keeps the helper firmware single-target and protocol-compatible. B1/B2 framing and local V/beacon detection are unchanged; the main camera alone owns the two-candidate queue and target lock, while CM7_1 owns the 70-second landing timer. During a live lock, helper data may only support the same mapped target, and it is not allowed to replace a target after the main mission enters its near/missing phase.
+The helper now detects the same maximum of three beacon candidates as the main
+camera, while B1/B2 remains protocol-compatible and returns only the pipeline's
+single confirmed `beacon_publish` result. The main camera still owns mission
+queueing and target lock, while CM7_1 owns the timed landing sequence. During a
+live lock, helper data may only support the same mapped target, and it is not
+allowed to replace a target after the main mission enters its near/missing
+phase.
 
 Do not add B3, global target IDs, a lamp counter, or a second helper-side target to this mission version. All three devices still need the matching mission branch flashed because the flight controller shared-memory version and the car A4 flag behavior changed.
 

@@ -2,8 +2,7 @@
 #define APP_CAMERA_HELPER_H_
 
 #include "zf_common_headfile.h"
-#include "algorithm/vision/algo_beacon.h"
-#include "algorithm/vision/algo_vlamp.h"
+#include "algorithm/vision/algo_vision_target_pipeline.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,7 +36,8 @@ typedef struct
     int16 mapped_dy;
     uint16 v_confidence_permille;
     uint16 beacon_confidence_permille;
-    algo_vlamp_result_t vlamp_result;
+    uint8 beacon_candidate_count;
+    algo_vision_target_result_t vlamp_result;
     algo_beacon_result_t beacon_result;
 } app_camera_helper_snapshot_t;
 

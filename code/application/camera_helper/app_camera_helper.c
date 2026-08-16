@@ -5,10 +5,10 @@
 #include <string.h>
 
 #define CAMERA_HELPER_IPS200_TYPE       (IPS200_TYPE_SPI)
-#define CAMERA_HELPER_UART_INDEX        (UART_1)
+#define CAMERA_HELPER_UART_INDEX        (UART_6)
 #define CAMERA_HELPER_UART_BAUD         (230400U)
-#define CAMERA_HELPER_UART_TX_PIN       (UART1_TX_P04_1)
-#define CAMERA_HELPER_UART_RX_PIN       (UART1_RX_P04_0)
+#define CAMERA_HELPER_UART_TX_PIN       (UART6_TX_P03_1)
+#define CAMERA_HELPER_UART_RX_PIN       (UART6_RX_P03_0)
 #define CAMERA_HELPER_TIMER             (TC_TIME2_CH0)
 
 #define CAMERA_HELPER_EXPOSURE_TIME     (64U)
@@ -30,10 +30,6 @@
 #define CAMERA_HELPER_REQ_LEN           (5U)
 #define CAMERA_HELPER_RSP_LEN           (27U)
 #define CAMERA_HELPER_RSP_CHECK_INDEX   (25U)
-#define CAMERA_HELPER_BEACON_IGNORE_MARGIN (4U)
-#define CAMERA_HELPER_BEACON_RETRY_MARGIN  (0U)
-#define CAMERA_HELPER_CONFLICT_CENTER_PX   (8.0f)
-#define CAMERA_HELPER_CONFLICT_GAP_PX      (14.0f)
 
 static app_camera_helper_snapshot_t s_snapshot;
 static uint8 s_boot_ready = 0U;
@@ -157,156 +153,6 @@ static void helper_draw_rect(uint16 x0, uint16 y0, uint16 x1, uint16 y1, uint16 
     ips200_draw_line(x1, y0, x1, y1, color);
 }
 
-static uint16 helper_rect_long_side(uint16 w, uint16 h)
-{
-    return (w > h) ? w : h;
-}
-
-static uint16 helper_rect_short_side(uint16 w, uint16 h)
-{
-    return (w > h) ? h : w;
-}
-
-static float helper_point_gap_to_rect(float px,
-                                      float py,
-                                      uint16 rx,
-                                      uint16 ry,
-                                      uint16 rw,
-                                      uint16 rh)
-{
-    float dx = 0.0f;
-    float dy = 0.0f;
-    float x0;
-    float y0;
-    float x1;
-    float y1;
-
-    if((rw == 0U) || (rh == 0U))
-    {
-        return 9999.0f;
-    }
-
-    x0 = (float)rx;
-    y0 = (float)ry;
-    x1 = (float)(rx + rw - 1U);
-    y1 = (float)(ry + rh - 1U);
-
-    if(px < x0) { dx = x0 - px; }
-    else if(px > x1) { dx = px - x1; }
-    if(py < y0) { dy = y0 - py; }
-    else if(py > y1) { dy = py - y1; }
-
-    return sqrtf((dx * dx) + (dy * dy));
-}
-
-static uint8 helper_point_inside_rect_margin(float px,
-                                             float py,
-                                             uint16 rx,
-                                             uint16 ry,
-                                             uint16 rw,
-                                             uint16 rh,
-                                             uint16 margin)
-{
-    int32 x0;
-    int32 y0;
-    int32 x1;
-    int32 y1;
-
-    if((rw == 0U) || (rh == 0U))
-    {
-        return 0U;
-    }
-
-    x0 = (rx > margin) ? (int32)(rx - margin) : 0;
-    y0 = (ry > margin) ? (int32)(ry - margin) : 0;
-    x1 = (int32)rx + (int32)rw - 1 + (int32)margin;
-    y1 = (int32)ry + (int32)rh - 1 + (int32)margin;
-
-    return (((int32)px >= x0) && ((int32)px <= x1)
-            && ((int32)py >= y0) && ((int32)py <= y1)) ? 1U : 0U;
-}
-
-static uint8 helper_beacon_period_confirmed(const algo_beacon_result_t *b_result)
-{
-    return ((b_result != 0)
-            && (b_result->found != 0U)
-            && ((b_result->zone_flags & ALGO_BEACON_ZONE_FLAG_PERIOD_CONFIRMED) != 0U)) ? 1U : 0U;
-}
-
-static uint8 helper_beacon_measurement_fresh(const algo_beacon_result_t *b_result)
-{
-    return ((b_result != 0)
-            && (b_result->found != 0U)
-            && (b_result->hold_active == 0U)) ? 1U : 0U;
-}
-
-static uint8 helper_beacon_conflicts_with_vlamp(const algo_vlamp_result_t *v_result,
-                                                const algo_beacon_result_t *b_result)
-{
-    uint16 b_long;
-    uint16 b_short;
-    float center_dx;
-    float center_dy;
-    float center_dist;
-    float gap;
-    float ratio;
-    uint8 edge_near;
-
-    if((v_result == 0) || (b_result == 0)
-       || (v_result->found == 0U) || (b_result->found == 0U))
-    {
-        return 0U;
-    }
-
-    if((v_result->hold_active != 0U)
-       && (helper_beacon_period_confirmed(b_result) != 0U))
-    {
-        return 0U;
-    }
-
-    if(helper_point_inside_rect_margin(b_result->center_x,
-                                       b_result->center_y,
-                                       v_result->bbox_x,
-                                       v_result->bbox_y,
-                                       v_result->bbox_w,
-                                       v_result->bbox_h,
-                                       2U) != 0U)
-    {
-        return 1U;
-    }
-
-    b_long = helper_rect_long_side(b_result->bbox_w, b_result->bbox_h);
-    b_short = helper_rect_short_side(b_result->bbox_w, b_result->bbox_h);
-    ratio = (b_short > 0U) ? ((float)b_long / (float)b_short) : 999.0f;
-    edge_near = ((b_result->zone_flags & ALGO_BEACON_ZONE_FLAG_EDGE) != 0U) ? 1U : 0U;
-    center_dx = b_result->center_x - v_result->center_x;
-    center_dy = b_result->center_y - v_result->center_y;
-    center_dist = sqrtf((center_dx * center_dx) + (center_dy * center_dy));
-    gap = helper_point_gap_to_rect(b_result->center_x,
-                                   b_result->center_y,
-                                   v_result->bbox_x,
-                                   v_result->bbox_y,
-                                   v_result->bbox_w,
-                                   v_result->bbox_h);
-
-    if((center_dist <= CAMERA_HELPER_CONFLICT_CENTER_PX)
-       && (b_result->confidence_permille <= (uint16)(v_result->confidence_permille + 180U)))
-    {
-        return 1U;
-    }
-
-    if((helper_beacon_period_confirmed(b_result) == 0U)
-       && (gap <= CAMERA_HELPER_CONFLICT_GAP_PX)
-       && (b_long >= 12U)
-       && ((edge_near == 0U) || ((b_result->area >= 30U) && (b_long >= 13U)))
-       && ((b_result->area >= 38U) || (ratio >= 1.55f)))
-    {
-        return 1U;
-    }
-
-    return 0U;
-}
-
 static void helper_status_cache_reset(void)
 {
     uint8 i;
@@ -379,8 +225,9 @@ static void helper_draw_status(void)
 
     (void)snprintf(line,
                    sizeof(line),
-                   "B:%u X:%03d Y:%03d C:%03u",
+                   "B:%u N:%u X:%03d Y:%03d C:%03u",
                    (unsigned int)s_snapshot.has_beacon,
+                   (unsigned int)s_snapshot.beacon_candidate_count,
                    (int)s_snapshot.beacon_x,
                    (int)s_snapshot.beacon_y,
                    (unsigned int)s_snapshot.beacon_confidence_permille);
@@ -408,7 +255,7 @@ static void helper_draw_status(void)
 
     (void)snprintf(line,
                    sizeof(line),
-                   "IMG:%ux%u->%ux%u DIV:%u UART1",
+                   "IMG:%ux%u->%ux%u DIV:%u UART6",
                    (unsigned int)MT9V03X_W,
                    (unsigned int)MT9V03X_H,
                    (unsigned int)CAMERA_HELPER_IMAGE_W,
@@ -417,7 +264,7 @@ static void helper_draw_status(void)
     helper_show_status_line(CAMERA_HELPER_STATUS_LINE4_Y, line, RGB565_WHITE);
 }
 
-static void helper_draw_vlamp_overlay(const algo_vlamp_result_t *result)
+static void helper_draw_vlamp_overlay(const algo_vision_target_result_t *result)
 {
     uint16 x0;
     uint16 y0;
@@ -425,8 +272,6 @@ static void helper_draw_vlamp_overlay(const algo_vlamp_result_t *result)
     uint16 y1;
     uint16 cx;
     uint16 cy;
-    float end_x;
-    float end_y;
 
     if((result == 0) || (result->found == 0U))
     {
@@ -445,9 +290,6 @@ static void helper_draw_vlamp_overlay(const algo_vlamp_result_t *result)
     ips200_set_color(RGB565_GREEN, RGB565_BLACK);
     ips200_show_string(x0, (y0 > 8U) ? (uint16)(y0 - 8U) : y0, "V");
 
-    end_x = result->center_x + (result->heading_x * 18.0f);
-    end_y = result->center_y + (result->heading_y * 18.0f);
-    ips200_draw_line(cx, cy, helper_map_camera_x(end_x), helper_map_camera_y(end_y), RGB565_CYAN);
 }
 
 static void helper_draw_beacon_overlay(const algo_beacon_result_t *result)
@@ -477,7 +319,7 @@ static void helper_draw_beacon_overlay(const algo_beacon_result_t *result)
     ips200_show_string(x0, (y0 > 8U) ? (uint16)(y0 - 8U) : y0, "B");
 }
 
-static void helper_draw_vb_link(const algo_vlamp_result_t *v_result,
+static void helper_draw_vb_link(const algo_vision_target_result_t *v_result,
                                 const algo_beacon_result_t *b_result)
 {
     if((v_result == 0) || (b_result == 0)
@@ -640,101 +482,27 @@ void app_camera_helper_on_byte(uint8 byte)
     helper_process_uart_byte(byte);
 }
 
-static void helper_detect_targets(algo_vlamp_result_t *v_result,
-                                   algo_beacon_result_t *b_result)
+static void helper_update_snapshot(const algo_vision_target_pipeline_result_t *targets,
+                                   uint16 frame_id)
 {
-    const algo_vlamp_result_t *vlamp_raw;
-    const algo_beacon_result_t *beacon_raw;
+    const algo_vision_target_result_t *v_result;
+    const algo_beacon_result_t *b_result;
 
-    memset(v_result, 0, sizeof(*v_result));
-    memset(b_result, 0, sizeof(*b_result));
-
-    algo_vlamp_process((const uint8 *)mt9v03x_image);
-    vlamp_raw = algo_vlamp_get_result();
-    if(vlamp_raw != 0)
+    if(targets == 0)
     {
-        *v_result = *vlamp_raw;
+        return;
     }
-
-    if((v_result->found != 0U) && (v_result->hold_active == 0U))
-    {
-        algo_beacon_set_ignore_rect(v_result->bbox_x,
-                                    v_result->bbox_y,
-                                    v_result->bbox_w,
-                                    v_result->bbox_h,
-                                    CAMERA_HELPER_BEACON_IGNORE_MARGIN);
-    }
-    else
-    {
-        algo_beacon_clear_ignore_rect();
-    }
-
-    algo_beacon_process((const uint8 *)mt9v03x_image);
-    beacon_raw = algo_beacon_get_result();
-    if(beacon_raw != 0)
-    {
-        *b_result = *beacon_raw;
-    }
-
-    if((v_result->found != 0U) && (v_result->hold_active == 0U)
-       && ((helper_beacon_measurement_fresh(b_result) == 0U)
-           || (helper_beacon_conflicts_with_vlamp(v_result, b_result) != 0U)))
-    {
-        algo_beacon_set_ignore_rect(v_result->bbox_x,
-                                    v_result->bbox_y,
-                                    v_result->bbox_w,
-                                    v_result->bbox_h,
-                                    CAMERA_HELPER_BEACON_RETRY_MARGIN);
-        algo_beacon_process((const uint8 *)mt9v03x_image);
-        beacon_raw = algo_beacon_get_result();
-        if(beacon_raw != 0)
-        {
-            *b_result = *beacon_raw;
-        }
-    }
-
-    if((v_result->found != 0U) && (v_result->hold_active == 0U)
-       && ((helper_beacon_measurement_fresh(b_result) == 0U)
-           || (helper_beacon_conflicts_with_vlamp(v_result, b_result) != 0U)))
-    {
-        /* 与主摄一致，最后进行一次无屏蔽补检。只有与 V 几何独立的当前帧
-         * 结果才能保留，避免把 V 亮核作为信标发回。 */
-        algo_beacon_clear_ignore_rect();
-        algo_beacon_process((const uint8 *)mt9v03x_image);
-        beacon_raw = algo_beacon_get_result();
-        if(beacon_raw != 0)
-        {
-            *b_result = *beacon_raw;
-        }
-        if((helper_beacon_measurement_fresh(b_result) == 0U)
-           || (helper_beacon_conflicts_with_vlamp(v_result, b_result) != 0U))
-        {
-            memset(b_result, 0, sizeof(*b_result));
-            algo_beacon_reset();
-        }
-    }
-
-    if(helper_beacon_measurement_fresh(b_result) == 0U)
-    {
-        memset(b_result, 0, sizeof(*b_result));
-    }
-    else if(helper_beacon_conflicts_with_vlamp(v_result, b_result) != 0U)
-    {
-        memset(b_result, 0, sizeof(*b_result));
-        algo_beacon_reset();
-    }
-}
-
-static void helper_update_snapshot(const algo_vlamp_result_t *v_result,
-                                   const algo_beacon_result_t *b_result)
-{
-    uint16 next_frame_id = (uint16)(s_snapshot.frame_id + 1U);
+    v_result = &targets->target_control;
+    b_result = &targets->beacon_publish;
 
     memset(&s_snapshot, 0, sizeof(s_snapshot));
     s_snapshot.timestamp_ms = timer_get(CAMERA_HELPER_TIMER);
-    s_snapshot.frame_id = next_frame_id;
+    s_snapshot.frame_id = frame_id;
+    s_snapshot.beacon_candidate_count = targets->beacon_candidates.count;
 
-    if((v_result != 0) && (v_result->found != 0U))
+    if((v_result != 0) && (v_result->found != 0U)
+       && (v_result->hold_active == 0U)
+       && (v_result->source != ALGO_VISION_TARGET_SOURCE_PURE_HOLD))
     {
         s_snapshot.has_vlamp = 1U;
         s_snapshot.v_x = helper_float_to_i16(v_result->center_x);
@@ -806,8 +574,7 @@ void app_camera_helper_init(void)
     timer_init(CAMERA_HELPER_TIMER, TIMER_MS);
     timer_start(CAMERA_HELPER_TIMER);
     uart_rx_interrupt(CAMERA_HELPER_UART_INDEX, 1U);
-    algo_beacon_reset();
-    algo_vlamp_reset();
+    algo_vision_target_pipeline_init();
 
     ips200_full(RGB565_BLACK);
     helper_draw_status();
@@ -816,8 +583,8 @@ void app_camera_helper_init(void)
 
 void app_camera_helper_tick(void)
 {
-    algo_vlamp_result_t vlamp_result;
-    algo_beacon_result_t beacon_result;
+    algo_vision_target_pipeline_result_t targets;
+    uint16 frame_id;
 
     if(s_boot_ready == 0U)
     {
@@ -832,8 +599,11 @@ void app_camera_helper_tick(void)
     }
 
     mt9v03x_finish_flag = 0U;
-    helper_detect_targets(&vlamp_result, &beacon_result);
-    helper_update_snapshot(&vlamp_result, &beacon_result);
+    frame_id = (uint16)(s_snapshot.frame_id + 1U);
+    algo_vision_target_pipeline_update((const uint8 *)mt9v03x_image,
+                                       frame_id,
+                                       &targets);
+    helper_update_snapshot(&targets, frame_id);
 
     s_display_divider++;
     if(s_display_divider >= CAMERA_HELPER_DISPLAY_DIV)

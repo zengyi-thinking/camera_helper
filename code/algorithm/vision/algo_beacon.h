@@ -23,12 +23,22 @@ typedef struct
     uint16_t confidence_permille;
 } algo_beacon_result_t;
 
+#define ALGO_BEACON_MAX_CANDIDATES (3U)
+
+typedef struct
+{
+    uint8_t full_detect;
+    uint8_t count;
+    algo_beacon_result_t items[ALGO_BEACON_MAX_CANDIDATES];
+} algo_beacon_result_list_t;
+
 #define ALGO_BEACON_RESULT_SOURCE_BLOB      (0U)
 #define ALGO_BEACON_RESULT_SOURCE_FAR_POINT (1U)
 
 #define ALGO_BEACON_ZONE_FLAG_FAR_POINT       (1U << 0)
 #define ALGO_BEACON_ZONE_FLAG_EDGE            (1U << 1)
 #define ALGO_BEACON_ZONE_FLAG_PERIOD_CONFIRMED (1U << 2)
+#define ALGO_BEACON_ZONE_FLAG_DIFFUSE_CANDIDATE (1U << 3)
 
 void algo_beacon_reset(void);
 void algo_beacon_set_ignore_rect(uint16_t x,
@@ -39,6 +49,7 @@ void algo_beacon_set_ignore_rect(uint16_t x,
 void algo_beacon_clear_ignore_rect(void);
 void algo_beacon_process(const uint8 *src_image);
 const algo_beacon_result_t *algo_beacon_get_result(void);
+const algo_beacon_result_list_t *algo_beacon_get_candidates(void);
 
 #ifdef __cplusplus
 }

@@ -25,11 +25,8 @@
 #define ALGO_BEACON_VLAMP_SMALL_RATIO          (1.45f)
 #define ALGO_BEACON_VLAMP_SMALL_AXIS           (1.60f)
 #define ALGO_BEACON_VLAMP_SMALL_SPARSE_FILL    (0.42f)
-#define ALGO_BEACON_EDGE_MARGIN           (20U)
-#define ALGO_BEACON_EDGE_RETRY_FACTOR     (0.42f)
-#define ALGO_BEACON_EDGE_RETRY_ADD        (26.0f)
-#define ALGO_BEACON_EDGE_RETRY_MIN        (80.0f)
-#define ALGO_BEACON_EDGE_RETRY_MAX        (190.0f)
+#define ALGO_BEACON_EDGE_MARGIN           (16U)
+#define ALGO_BEACON_Y_EDGE_MARGIN         (34U)
 #define ALGO_BEACON_FAR_RADIUS            (5)
 #define ALGO_BEACON_FAR_CORE_RADIUS       (1)
 #define ALGO_BEACON_FAR_AREA_MAX          (18U)
@@ -43,12 +40,23 @@
 #define ALGO_BEACON_CONF_FLOOR_CONFIRMED  (700U)
 #define ALGO_BEACON_FLICKER_HIST_LEN      (24U)
 #define ALGO_BEACON_FLICKER_HIST_MIN      (14U)
+/* 漫射斑候选: 近距过曝信标在画面上晕开成大面积低填充亮斑,
+ * 常规信标几何门(面积/长边上限)会整体拒收, 该类别单独放行并打上
+ * 漫射候选标志, 由流水线侧临时通道单独把关。 */
+#define ALGO_BEACON_DIFFUSE_LONG_MAX_CENTER (40U)
+#define ALGO_BEACON_DIFFUSE_LONG_MAX_EDGE  (44U)
+#define ALGO_BEACON_DIFFUSE_AREA_MAX       (700U)
+#define ALGO_BEACON_DIFFUSE_RATIO_MAX      (2.20f)
+#define ALGO_BEACON_DIFFUSE_FILL_MIN       (0.12f)
+#define ALGO_BEACON_CANDIDATE_MERGE_PX    (8.0f)
+#define ALGO_BEACON_CANDIDATE_SEPARATE_PX (12.0f)
 
 typedef struct
 {
     uint8 valid;
     uint8 source;
     uint8 edge_near;
+    uint8 diffuse_candidate;
     uint16 min_x;
     uint16 min_y;
     uint16 max_x;
@@ -74,6 +82,7 @@ static uint16 s_queue_x[ALGO_BEACON_QUEUE_CAP];
 static uint16 s_queue_y[ALGO_BEACON_QUEUE_CAP];
 static algo_beacon_result_t s_result;
 static algo_beacon_result_t s_last_result;
+static algo_beacon_result_list_t s_candidates;
 static uint8 s_hold_left = 0U;
 static uint8 s_ignore_enabled = 0U;
 static uint16 s_ignore_x0 = 0U;
@@ -104,6 +113,75 @@ static uint8 algo_beacon_clamp_u8(float value)
     return (uint8)(value + 0.5f);
 }
 
+static float algo_beacon_candidate_distance(const algo_beacon_candidate_t *a,
+                                             const algo_beacon_candidate_t *b)
+{
+    float dx;
+    float dy;
+
+    if((a == 0) || (b == 0))
+    {
+        return 9999.0f;
+    }
+    dx = a->center_x - b->center_x;
+    dy = a->center_y - b->center_y;
+    return sqrtf((dx * dx) + (dy * dy));
+}
+
+static void algo_beacon_insert_candidate(algo_beacon_candidate_t candidates[ALGO_BEACON_MAX_CANDIDATES],
+                                         uint8 *count,
+                                         const algo_beacon_candidate_t *candidate)
+{
+    uint8 i;
+    uint8 insert_at;
+
+    if((candidates == 0) || (count == 0) || (candidate == 0) || (candidate->valid == 0U))
+    {
+        return;
+    }
+
+    for(i = 0U; i < *count; i++)
+    {
+        float dist = algo_beacon_candidate_distance(&candidates[i], candidate);
+        if(dist <= ALGO_BEACON_CANDIDATE_MERGE_PX)
+        {
+            if(candidate->score > candidates[i].score)
+            {
+                candidates[i] = *candidate;
+            }
+            return;
+        }
+        if(dist <= ALGO_BEACON_CANDIDATE_SEPARATE_PX)
+        {
+            return;
+        }
+    }
+
+    insert_at = *count;
+    for(i = 0U; i < *count; i++)
+    {
+        if(candidate->score > candidates[i].score)
+        {
+            insert_at = i;
+            break;
+        }
+    }
+
+    if(insert_at >= ALGO_BEACON_MAX_CANDIDATES)
+    {
+        return;
+    }
+    if(*count < ALGO_BEACON_MAX_CANDIDATES)
+    {
+        (*count)++;
+    }
+    for(i = (uint8)(*count - 1U); i > insert_at; i--)
+    {
+        candidates[i] = candidates[i - 1U];
+    }
+    candidates[insert_at] = *candidate;
+}
+
 static uint16 algo_beacon_long_side(uint16 w, uint16 h)
 {
     return (w > h) ? w : h;
@@ -127,6 +205,12 @@ static uint8 algo_beacon_near_edge(uint16 x, uint16 y)
             || ((y + ALGO_BEACON_EDGE_MARGIN) >= (MT9V03X_H - 1U))) ? 1U : 0U;
 }
 
+static uint8 algo_beacon_near_y_edge(uint16 y)
+{
+    return ((y <= ALGO_BEACON_Y_EDGE_MARGIN)
+            || ((y + ALGO_BEACON_Y_EDGE_MARGIN) >= (MT9V03X_H - 1U))) ? 1U : 0U;
+}
+
 static uint8 algo_beacon_in_ignore_rect(uint16 x, uint16 y)
 {
     if(s_ignore_enabled == 0U)
@@ -138,7 +222,10 @@ static uint8 algo_beacon_in_ignore_rect(uint16 x, uint16 y)
             && (y >= s_ignore_y0) && (y <= s_ignore_y1)) ? 1U : 0U;
 }
 
-static uint8 algo_beacon_zone_flags(uint8 source, uint8 edge_near, uint8 period_confirmed)
+static uint8 algo_beacon_zone_flags(uint8 source,
+                                    uint8 edge_near,
+                                    uint8 period_confirmed,
+                                    uint8 diffuse_candidate)
 {
     uint8 flags = 0U;
     if(source == ALGO_BEACON_RESULT_SOURCE_FAR_POINT)
@@ -152,6 +239,10 @@ static uint8 algo_beacon_zone_flags(uint8 source, uint8 edge_near, uint8 period_
     if(period_confirmed != 0U)
     {
         flags |= ALGO_BEACON_ZONE_FLAG_PERIOD_CONFIRMED;
+    }
+    if(diffuse_candidate != 0U)
+    {
+        flags |= ALGO_BEACON_ZONE_FLAG_DIFFUSE_CANDIDATE;
     }
     return flags;
 }
@@ -168,7 +259,7 @@ static void algo_beacon_reset_flicker(void)
     s_flicker_confirmed = 0U;
 }
 
-static void algo_beacon_build_binary(const uint8 *src_image, uint8 edge_retry)
+static void algo_beacon_build_binary(const uint8 *src_image)
 {
     uint32 sum = 0U;
     uint8 gray_max = 0U;
@@ -200,23 +291,10 @@ static void algo_beacon_build_binary(const uint8 *src_image, uint8 edge_retry)
     if(threshold > 220.0f) { threshold = 220.0f; }
     s_threshold_center = algo_beacon_clamp_u8(threshold);
 
-    if(edge_retry != 0U)
-    {
-        threshold = (float)gray_max * ALGO_BEACON_EDGE_RETRY_FACTOR;
-        if((mean + ALGO_BEACON_EDGE_RETRY_ADD) > threshold)
-        {
-            threshold = mean + ALGO_BEACON_EDGE_RETRY_ADD;
-        }
-        if(threshold < ALGO_BEACON_EDGE_RETRY_MIN) { threshold = ALGO_BEACON_EDGE_RETRY_MIN; }
-        if(threshold > ALGO_BEACON_EDGE_RETRY_MAX) { threshold = ALGO_BEACON_EDGE_RETRY_MAX; }
-    }
-    else
-    {
-        threshold = (float)gray_max * 0.30f;
-        if((mean + 18.0f) > threshold) { threshold = mean + 18.0f; }
-        if(threshold < 58.0f) { threshold = 58.0f; }
-        if(threshold > 155.0f) { threshold = 155.0f; }
-    }
+    threshold = (float)gray_max * 0.30f;
+    if((mean + 18.0f) > threshold) { threshold = mean + 18.0f; }
+    if(threshold < 58.0f) { threshold = 58.0f; }
+    if(threshold > 155.0f) { threshold = 155.0f; }
     s_threshold_edge = algo_beacon_clamp_u8(threshold);
 
     for(y = 0U; y < MT9V03X_H; y++)
@@ -433,8 +511,7 @@ static uint8 algo_beacon_blob_valid(algo_beacon_candidate_t *candidate)
      * blob 不应进入信标候选；圆润柔光信标会保留。 */
     if((long_side >= ALGO_BEACON_VLAMP_SMALL_LONG)
        && (candidate->area >= ALGO_BEACON_VLAMP_SMALL_AREA)
-       && ((candidate->edge_near == 0U)
-           || ((candidate->area >= 30U) && (long_side >= 13U)))
+       && ((candidate->edge_near == 0U) || (candidate->area >= 28U) || (long_side >= 13U))
        && ((candidate->ratio >= ALGO_BEACON_VLAMP_SMALL_RATIO)
            || (candidate->axis_ratio >= ALGO_BEACON_VLAMP_SMALL_AXIS)
            || ((candidate->fill <= ALGO_BEACON_VLAMP_SMALL_SPARSE_FILL)
@@ -478,6 +555,37 @@ static uint8 algo_beacon_blob_valid(algo_beacon_candidate_t *candidate)
 
     candidate->score = shape_score;
     return (shape_score >= 0.32f) ? 1U : 0U;
+}
+
+/* 漫射斑候选校验: 常规几何门拒收的大面积晕开亮斑(近距过曝信标),
+ * 在更宽的尺寸界内按填充度/长宽比/主轴比单独评分放行。 */
+static uint8 algo_beacon_diffuse_blob_valid(algo_beacon_candidate_t *candidate)
+{
+    uint16 w;
+    uint16 h;
+    uint16 long_side;
+    uint16 long_max;
+
+    if((candidate == 0) || (candidate->valid == 0U)) { return 0U; }
+    w = (uint16)(candidate->max_x - candidate->min_x + 1U);
+    h = (uint16)(candidate->max_y - candidate->min_y + 1U);
+    long_side = algo_beacon_long_side(w, h);
+    long_max = (candidate->edge_near != 0U)
+             ? ALGO_BEACON_DIFFUSE_LONG_MAX_EDGE : ALGO_BEACON_DIFFUSE_LONG_MAX_CENTER;
+    if((candidate->area < ALGO_BEACON_AREA_MIN)
+       || (candidate->area > ALGO_BEACON_DIFFUSE_AREA_MAX)
+       || (long_side > long_max)
+       || (candidate->ratio > ALGO_BEACON_DIFFUSE_RATIO_MAX)
+       || (candidate->fill < ALGO_BEACON_DIFFUSE_FILL_MIN)
+       || (candidate->axis_ratio > 2.8f))
+    {
+        return 0U;
+    }
+    candidate->diffuse_candidate = 1U;
+    candidate->score = 0.20f
+        + algo_beacon_clamp_float((candidate->fill - ALGO_BEACON_DIFFUSE_FILL_MIN) / 0.50f, 0.0f, 1.0f) * 0.20f
+        + algo_beacon_clamp_float((ALGO_BEACON_DIFFUSE_RATIO_MAX - candidate->ratio) / 1.20f, 0.0f, 1.0f) * 0.20f;
+    return 1U;
 }
 
 static uint8 algo_beacon_local_max(const uint8 *src_image, uint16 cx, uint16 cy)
@@ -537,7 +645,13 @@ static uint8 algo_beacon_collect_far_point(const uint8 *src_image,
     uint16 max_x = 0U;
     uint16 max_y = 0U;
     uint16 long_side;
+    uint16 width;
+    uint16 height;
+    uint16 short_side;
+    float fill;
+    float ratio;
     uint8 edge_near;
+    uint8 y_edge;
     float contrast_score;
     float peak_score;
     float area_score;
@@ -551,12 +665,21 @@ static uint8 algo_beacon_collect_far_point(const uint8 *src_image,
 
     peak = src_image[(uint32)cy * MT9V03X_W + cx];
     edge_near = algo_beacon_near_edge(cx, cy);
-    if(edge_near != 0U)
+    y_edge = algo_beacon_near_y_edge(cy);
+    if(y_edge != 0U)
     {
-        peak_min = 50U;
-        contrast_min = 12.0f;
-        score_min = 0.34f;
-        threshold_factor = 0.34f;
+        peak_min = 48U;
+        contrast_min = 11.0f;
+        score_min = 0.32f;
+        threshold_factor = 0.32f;
+        threshold_add = 4.0f;
+    }
+    else if(edge_near != 0U)
+    {
+        peak_min = 54U;
+        contrast_min = 13.0f;
+        score_min = 0.36f;
+        threshold_factor = 0.35f;
         threshold_add = 5.0f;
     }
     else
@@ -641,8 +764,17 @@ static uint8 algo_beacon_collect_far_point(const uint8 *src_image,
         return 0U;
     }
 
-    long_side = algo_beacon_long_side((uint16)(max_x - min_x + 1U), (uint16)(max_y - min_y + 1U));
-    if(long_side > ALGO_BEACON_FAR_LONG_MAX)
+    width = (uint16)(max_x - min_x + 1U);
+    height = (uint16)(max_y - min_y + 1U);
+    long_side = algo_beacon_long_side(width, height);
+    short_side = algo_beacon_short_side(width, height);
+    fill = (float)area / ((float)width * (float)height);
+    ratio = (short_side > 0U) ? ((float)long_side / (float)short_side) : 999.0f;
+    /* 远点通道原先只查峰值和面积, 细长反光(绳子/边缘高光)会绕过几何门。
+     * 真远距点灯应保持紧凑: 长线状或离散反光在此直接拒绝。 */
+    if((long_side > ALGO_BEACON_FAR_LONG_MAX)
+       || (ratio > 2.5f)
+       || (fill < 0.30f))
     {
         return 0U;
     }
@@ -673,23 +805,23 @@ static uint8 algo_beacon_collect_far_point(const uint8 *src_image,
     candidate_out->sum_gray = sum_gray;
     candidate_out->center_x = (float)sum_x / (float)area;
     candidate_out->center_y = (float)sum_y / (float)area;
-    candidate_out->fill = 1.0f;
-    candidate_out->ratio = 1.0f;
+    candidate_out->fill = fill;
+    candidate_out->ratio = ratio;
     candidate_out->axis_ratio = 1.0f;
     candidate_out->score = score + ((edge_near != 0U) ? 0.04f : 0.0f);
     return 1U;
 }
 
 static uint8 algo_beacon_detect_blob(const uint8 *src_image,
-                                     uint8 edge_retry,
-                                     algo_beacon_candidate_t *best_out)
+                                     algo_beacon_candidate_t candidates[ALGO_BEACON_MAX_CANDIDATES],
+                                     uint8 *count_out)
 {
     uint16 x;
     uint16 y;
-    uint8 found = 0U;
+    uint8 count = 0U;
 
-    memset(best_out, 0, sizeof(*best_out));
-    algo_beacon_build_binary(src_image, edge_retry);
+    memset(candidates, 0, sizeof(algo_beacon_candidate_t) * ALGO_BEACON_MAX_CANDIDATES);
+    algo_beacon_build_binary(src_image);
 
     for(y = 0U; y < MT9V03X_H; y++)
     {
@@ -699,28 +831,31 @@ static uint8 algo_beacon_detect_blob(const uint8 *src_image,
             {
                 algo_beacon_candidate_t candidate;
                 if((algo_beacon_collect_component(src_image, x, y, &candidate) != 0U)
-                   && (algo_beacon_blob_valid(&candidate) != 0U))
+                   && ((algo_beacon_blob_valid(&candidate) != 0U)
+                       || (algo_beacon_diffuse_blob_valid(&candidate) != 0U)))
                 {
-                    if((found == 0U) || (candidate.score > best_out->score))
-                    {
-                        *best_out = candidate;
-                        found = 1U;
-                    }
+                    algo_beacon_insert_candidate(candidates, &count, &candidate);
                 }
             }
         }
     }
 
-    return found;
+    if(count_out != 0)
+    {
+        *count_out = count;
+    }
+    return (count > 0U) ? 1U : 0U;
 }
 
-static uint8 algo_beacon_detect_far(const uint8 *src_image, algo_beacon_candidate_t *best_out)
+static uint8 algo_beacon_detect_far(const uint8 *src_image,
+                                    algo_beacon_candidate_t candidates[ALGO_BEACON_MAX_CANDIDATES],
+                                    uint8 *count_out)
 {
     uint16 x;
     uint16 y;
-    uint8 found = 0U;
+    uint8 count = 0U;
 
-    memset(best_out, 0, sizeof(*best_out));
+    memset(candidates, 0, sizeof(algo_beacon_candidate_t) * ALGO_BEACON_MAX_CANDIDATES);
     if(src_image == 0)
     {
         return 0U;
@@ -730,7 +865,7 @@ static uint8 algo_beacon_detect_far(const uint8 *src_image, algo_beacon_candidat
     {
         for(x = 0U; x < MT9V03X_W; x++)
         {
-            uint8 peak_min = (algo_beacon_near_edge(x, y) != 0U) ? 50U : 64U;
+            uint8 peak_min = algo_beacon_near_y_edge(y) ? 48U : (algo_beacon_near_edge(x, y) ? 54U : 64U);
             if(src_image[(uint32)y * MT9V03X_W + x] < peak_min)
             {
                 continue;
@@ -739,17 +874,17 @@ static uint8 algo_beacon_detect_far(const uint8 *src_image, algo_beacon_candidat
                 algo_beacon_candidate_t candidate;
                 if(algo_beacon_collect_far_point(src_image, x, y, &candidate) != 0U)
                 {
-                    if((found == 0U) || (candidate.score > best_out->score))
-                    {
-                        *best_out = candidate;
-                        found = 1U;
-                    }
+                    algo_beacon_insert_candidate(candidates, &count, &candidate);
                 }
             }
         }
     }
 
-    return found;
+    if(count_out != 0)
+    {
+        *count_out = count;
+    }
+    return (count > 0U) ? 1U : 0U;
 }
 
 static float algo_beacon_sample_roi(const uint8 *src_image, float cx, float cy)
@@ -900,7 +1035,8 @@ static void algo_beacon_commit_candidate(const uint8 *src_image, const algo_beac
     s_result.source = candidate->source;
     s_result.zone_flags = algo_beacon_zone_flags(candidate->source,
                                                  candidate->edge_near,
-                                                 period_confirmed);
+                                                 period_confirmed,
+                                                 candidate->diffuse_candidate);
     s_result.center_x = candidate->center_x;
     s_result.center_y = candidate->center_y;
     s_result.bbox_x = candidate->min_x;
@@ -913,6 +1049,80 @@ static void algo_beacon_commit_candidate(const uint8 *src_image, const algo_beac
     s_hold_left = ALGO_BEACON_HOLD_FRAMES;
 }
 
+static void algo_beacon_candidate_to_result(const algo_beacon_candidate_t *candidate,
+                                            algo_beacon_result_t *result)
+{
+    uint32 confidence;
+
+    if(result == 0)
+    {
+        return;
+    }
+    memset(result, 0, sizeof(*result));
+    if((candidate == 0) || (candidate->valid == 0U))
+    {
+        return;
+    }
+
+    confidence = (uint32)(candidate->score * 760.0f) + 90U;
+    if(confidence > ALGO_BEACON_CONF_CAP_UNCONFIRMED)
+    {
+        confidence = ALGO_BEACON_CONF_CAP_UNCONFIRMED;
+    }
+    result->found = 1U;
+    result->source = candidate->source;
+    result->zone_flags = algo_beacon_zone_flags(candidate->source,
+                                                 candidate->edge_near,
+                                                 0U,
+                                                 candidate->diffuse_candidate);
+    result->center_x = candidate->center_x;
+    result->center_y = candidate->center_y;
+    result->bbox_x = candidate->min_x;
+    result->bbox_y = candidate->min_y;
+    result->bbox_w = (uint16_t)(candidate->max_x - candidate->min_x + 1U);
+    result->bbox_h = (uint16_t)(candidate->max_y - candidate->min_y + 1U);
+    result->area = candidate->area;
+    result->confidence_permille = (uint16_t)confidence;
+}
+
+static void algo_beacon_build_result_list(const algo_beacon_candidate_t *primary,
+                                          const algo_beacon_candidate_t blob_candidates[ALGO_BEACON_MAX_CANDIDATES],
+                                          uint8 blob_count,
+                                          const algo_beacon_candidate_t far_candidates[ALGO_BEACON_MAX_CANDIDATES],
+                                          uint8 far_count)
+{
+    algo_beacon_candidate_t merged[ALGO_BEACON_MAX_CANDIDATES];
+    uint8 merged_count = 0U;
+    uint8 i;
+
+    memset(&s_candidates, 0, sizeof(s_candidates));
+    s_candidates.full_detect = 1U;
+    memset(merged, 0, sizeof(merged));
+    algo_beacon_insert_candidate(merged, &merged_count, primary);
+    for(i = 0U; i < blob_count; i++)
+    {
+        algo_beacon_insert_candidate(merged, &merged_count, &blob_candidates[i]);
+    }
+    for(i = 0U; i < far_count; i++)
+    {
+        algo_beacon_insert_candidate(merged, &merged_count, &far_candidates[i]);
+    }
+
+    s_candidates.count = merged_count;
+    for(i = 0U; i < merged_count; i++)
+    {
+        if((i == 0U) && (s_result.found != 0U)
+           && (algo_beacon_candidate_distance(&merged[i], primary) <= ALGO_BEACON_CANDIDATE_MERGE_PX))
+        {
+            s_candidates.items[i] = s_result;
+        }
+        else
+        {
+            algo_beacon_candidate_to_result(&merged[i], &s_candidates.items[i]);
+        }
+    }
+}
+
 void algo_beacon_reset(void)
 {
     algo_beacon_clear_result();
@@ -920,6 +1130,7 @@ void algo_beacon_reset(void)
     s_hold_left = 0U;
     algo_beacon_reset_flicker();
     memset(s_binary, 0, sizeof(s_binary));
+    memset(&s_candidates, 0, sizeof(s_candidates));
 }
 
 void algo_beacon_set_ignore_rect(uint16_t x,
@@ -964,15 +1175,19 @@ void algo_beacon_clear_ignore_rect(void)
 
 void algo_beacon_process(const uint8 *src_image)
 {
-    algo_beacon_candidate_t blob_candidate;
-    algo_beacon_candidate_t far_candidate;
+    algo_beacon_candidate_t blob_candidates[ALGO_BEACON_MAX_CANDIDATES];
+    algo_beacon_candidate_t far_candidates[ALGO_BEACON_MAX_CANDIDATES];
     algo_beacon_candidate_t best_candidate;
+    uint8 blob_count = 0U;
+    uint8 far_count = 0U;
     uint8 blob_found;
     uint8 far_found;
 
-    memset(&blob_candidate, 0, sizeof(blob_candidate));
-    memset(&far_candidate, 0, sizeof(far_candidate));
+    memset(blob_candidates, 0, sizeof(blob_candidates));
+    memset(far_candidates, 0, sizeof(far_candidates));
     memset(&best_candidate, 0, sizeof(best_candidate));
+    memset(&s_candidates, 0, sizeof(s_candidates));
+    s_candidates.full_detect = 1U;
 
     if(src_image == 0)
     {
@@ -980,33 +1195,32 @@ void algo_beacon_process(const uint8 *src_image)
         return;
     }
 
-    blob_found = algo_beacon_detect_blob(src_image, 0U, &blob_candidate);
-    far_found = algo_beacon_detect_far(src_image, &far_candidate);
-    if((blob_found == 0U) && (far_found == 0U))
-    {
-        /* 低边缘阈值可能把灯核与背景连成大块。仅在首轮完全失败时，
-         * 用较高边缘阈值再分割一次；中心区阈值和形状规则保持不变。 */
-        blob_found = algo_beacon_detect_blob(src_image, 1U, &blob_candidate);
-    }
+    blob_found = algo_beacon_detect_blob(src_image, blob_candidates, &blob_count);
+    far_found = algo_beacon_detect_far(src_image, far_candidates, &far_count);
 
     if((blob_found != 0U) && (far_found != 0U))
     {
-        best_candidate = (far_candidate.score > (blob_candidate.score + 0.08f))
-                       ? far_candidate
-                       : blob_candidate;
+        best_candidate = (far_candidates[0].score > (blob_candidates[0].score + 0.08f))
+                       ? far_candidates[0]
+                       : blob_candidates[0];
     }
     else if(blob_found != 0U)
     {
-        best_candidate = blob_candidate;
+        best_candidate = blob_candidates[0];
     }
     else if(far_found != 0U)
     {
-        best_candidate = far_candidate;
+        best_candidate = far_candidates[0];
     }
 
     if(best_candidate.valid != 0U)
     {
         algo_beacon_commit_candidate(src_image, &best_candidate);
+        algo_beacon_build_result_list(&best_candidate,
+                                      blob_candidates,
+                                      blob_count,
+                                      far_candidates,
+                                      far_count);
         return;
     }
 
@@ -1033,4 +1247,9 @@ void algo_beacon_process(const uint8 *src_image)
 const algo_beacon_result_t *algo_beacon_get_result(void)
 {
     return &s_result;
+}
+
+const algo_beacon_result_list_t *algo_beacon_get_candidates(void)
+{
+    return &s_candidates;
 }
