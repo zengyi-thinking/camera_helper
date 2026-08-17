@@ -1,5 +1,8 @@
 #include "app_camera_helper.h"
 
+#include "algorithm/vision/algo_camera_geometry.h"
+#include "hardware/hw_config.h"
+
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -32,6 +35,7 @@
 #define CAMERA_HELPER_RSP_CHECK_INDEX   (25U)
 
 static app_camera_helper_snapshot_t s_snapshot;
+static algo_camera_geometry_t s_lens_geometry;
 static uint8 s_boot_ready = 0U;
 static uint8 s_display_divider = 0U;
 static uint8 s_request_buf[CAMERA_HELPER_REQ_LEN];
@@ -522,11 +526,33 @@ static void helper_update_snapshot(const algo_vision_target_pipeline_result_t *t
 
     if((s_snapshot.has_vlamp != 0U) && (s_snapshot.has_beacon != 0U))
     {
+        float corrected_v_x;
+        float corrected_v_y;
+        float corrected_b_x;
+        float corrected_b_y;
+        float corrected_dx;
+        float corrected_dy;
+
         s_snapshot.move_valid = 1U;
         s_snapshot.raw_dx = (int16)(s_snapshot.beacon_x - s_snapshot.v_x);
         s_snapshot.raw_dy = (int16)(s_snapshot.beacon_y - s_snapshot.v_y);
-        s_snapshot.mapped_dx = (int16)(-s_snapshot.raw_dy);
-        s_snapshot.mapped_dy = s_snapshot.raw_dx;
+        algo_camera_geometry_correct_point(&s_lens_geometry,
+                                           (float)s_snapshot.v_x,
+                                           (float)s_snapshot.v_y,
+                                           &corrected_v_x,
+                                           &corrected_v_y);
+        algo_camera_geometry_correct_point(&s_lens_geometry,
+                                           (float)s_snapshot.beacon_x,
+                                           (float)s_snapshot.beacon_y,
+                                           &corrected_b_x,
+                                           &corrected_b_y);
+        corrected_dx = corrected_b_x - corrected_v_x;
+        corrected_dy = corrected_b_y - corrected_v_y;
+        /* Helper is mounted 90 degrees from the main camera.  Rotate the
+         * corrected relative vector once here; the main board must not apply
+         * lens correction to this mapped vector again. */
+        s_snapshot.mapped_dx = helper_float_to_i16(-corrected_dy);
+        s_snapshot.mapped_dy = helper_float_to_i16(corrected_dx);
     }
 
     if(s_snapshot.has_vlamp != 0U)
@@ -547,6 +573,12 @@ static void helper_update_snapshot(const algo_vision_target_pipeline_result_t *t
 void app_camera_helper_init(void)
 {
     memset(&s_snapshot, 0, sizeof(s_snapshot));
+    algo_camera_geometry_configure(&s_lens_geometry,
+                                   MT9V03X_W,
+                                   MT9V03X_H,
+                                   HW_VISION_LENS_DIAGONAL_FOV_DEG,
+                                   HW_VISION_LENS_MAX_SCALE,
+                                   HW_VISION_LENS_CORRECTION_ENABLE);
     s_request_pos = 0U;
     s_last_request_seq = 0U;
     s_request_count = 0U;

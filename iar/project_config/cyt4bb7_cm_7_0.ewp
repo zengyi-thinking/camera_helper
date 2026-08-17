@@ -1858,6 +1858,12 @@
             <group>
                 <name>vision</name>
                 <file>
+                    <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_camera_geometry.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_camera_geometry.h</name>
+                </file>
+                <file>
                     <name>$PROJ_DIR$\..\..\code\algorithm\vision\algo_beacon.c</name>
                 </file>
                 <file>
