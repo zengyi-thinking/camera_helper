@@ -1,5 +1,7 @@
 #include "algo_beacon.h"
 
+#include "../../hardware/hw_config.h"
+
 #include <math.h>
 #include <string.h>
 
@@ -613,6 +615,54 @@ static uint8 algo_beacon_local_max(const uint8 *src_image, uint16 cx, uint16 cy)
     return 1U;
 }
 
+/* 径向亮度补偿系数: 按候选点到画面中心的归一化半径(半对角线为 1)
+ * 分段取值, 广角鱼眼边缘光斑照度随视角衰减又小又暗, 门槛按分带
+ * 系数放宽; 关闭总开关时恒为 1, 回到全画面统一门槛。 */
+static float algo_beacon_radial_threshold_factor(uint16 cx, uint16 cy)
+{
+#if HW_BEACON_RADIAL_COMP_ENABLE != 0U
+    const float half_w = (float)(MT9V03X_W - 1U) * 0.5f;
+    const float half_h = (float)(MT9V03X_H - 1U) * 0.5f;
+    const float half_diag = sqrtf((half_w * half_w) + (half_h * half_h));
+    float dx = (float)cx - half_w;
+    float dy = (float)cy - half_h;
+    float r_norm = sqrtf((dx * dx) + (dy * dy)) / half_diag;
+
+    if(r_norm >= HW_BEACON_RADIAL_OUTER_RADIUS)
+    {
+        return HW_BEACON_RADIAL_OUTER_FACTOR;
+    }
+    if(r_norm >= HW_BEACON_RADIAL_MID_RADIUS)
+    {
+        return HW_BEACON_RADIAL_MID_FACTOR;
+    }
+#else
+    (void)cx;
+    (void)cy;
+#endif
+    return 1.0f;
+}
+
+/* 峰值/对比度门槛的径向补偿应用, 带噪声下限。 */
+static uint8 algo_beacon_radial_apply_peak(uint8 peak_min, uint16 cx, uint16 cy)
+{
+    float value = (float)peak_min * algo_beacon_radial_threshold_factor(cx, cy);
+
+    if(value < (float)HW_BEACON_RADIAL_PEAK_FLOOR)
+    {
+        value = (float)HW_BEACON_RADIAL_PEAK_FLOOR;
+    }
+    return (uint8)(value + 0.5f);
+}
+
+static float algo_beacon_radial_apply_contrast(float contrast_min, uint16 cx, uint16 cy)
+{
+    float value = contrast_min * algo_beacon_radial_threshold_factor(cx, cy);
+
+    return (value < HW_BEACON_RADIAL_CONTRAST_FLOOR)
+         ? HW_BEACON_RADIAL_CONTRAST_FLOOR : value;
+}
+
 static uint8 algo_beacon_collect_far_point(const uint8 *src_image,
                                            uint16 cx,
                                            uint16 cy,
@@ -690,6 +740,11 @@ static uint8 algo_beacon_collect_far_point(const uint8 *src_image,
         threshold_factor = 0.38f;
         threshold_add = 7.0f;
     }
+
+    /* 鱼眼径向补偿: 广角边缘光斑更暗, 峰值/对比度门槛按分带系数
+     * 放宽(噪声下限见宏), 评分门槛与局部分割参数保持不动。 */
+    peak_min = algo_beacon_radial_apply_peak(peak_min, cx, cy);
+    contrast_min = algo_beacon_radial_apply_contrast(contrast_min, cx, cy);
 
     if((peak < peak_min) || (algo_beacon_local_max(src_image, cx, cy) == 0U))
     {
@@ -865,7 +920,13 @@ static uint8 algo_beacon_detect_far(const uint8 *src_image,
     {
         for(x = 0U; x < MT9V03X_W; x++)
         {
-            uint8 peak_min = algo_beacon_near_y_edge(y) ? 48U : (algo_beacon_near_edge(x, y) ? 54U : 64U);
+            /* 扫描预过滤与采集门槛用同一径向补偿, 防止边缘暗斑在
+             * 扫描层就被跳过。 */
+            uint8 peak_min = algo_beacon_radial_apply_peak(
+                                  (algo_beacon_near_y_edge(y) ? 48U
+                                   : (algo_beacon_near_edge(x, y) ? 54U : 64U)),
+                                  x,
+                                  y);
             if(src_image[(uint32)y * MT9V03X_W + x] < peak_min)
             {
                 continue;
