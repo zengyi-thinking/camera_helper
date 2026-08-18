@@ -90,7 +90,7 @@
  * 52 留约 25% 余量不误裁; 吞信标后 long 通常 >52 可被拦截。极近距 V 据实调大。 */
 #define VISION_TARGET_BBOX_LONG_MAX_PX    (52U)
 #define VISION_TARGET_CONTROL_MAIN_STEP_MAX_PX (12.0f)
-#define VISION_TARGET_CONTROL_LOW_CONF_PERMILLE (360U)
+#define VISION_TARGET_CONTROL_LOW_CONF_PERMILLE (150U)
 #define VISION_TARGET_CONTROL_JUMP_CONFIRM_PX (10.0f)
 #define VISION_TARGET_CONTROL_PENDING_MATCH_PX (8.0f)
 #define VISION_TARGET_CONTROL_CONFIRM_HITS (2U)
@@ -989,13 +989,9 @@ static uint8 vision_target_control_candidate_confirmed(const algo_vision_target_
         return 0U;
     }
 
-    if(s_target_control_pending.source != result->source)
-    {
-        s_target_control_pending = *result;
-        s_target_control_pending_hits = 1U;
-        return 0U;
-    }
-
+    /* 确认以位置连续性为准, 检测来源(严格V/局部恢复/亮区回退)交替
+     * 不再重置计数: 远距弱检测下来源逐帧交替曾把确认计数反复清零,
+     * 控制位置被冻结在旧值, 表现为对远处目标毫无追赶。 */
     dx = result->center_x - s_target_control_pending.center_x;
     dy = result->center_y - s_target_control_pending.center_y;
     dist = sqrtf((dx * dx) + (dy * dy));
@@ -1051,7 +1047,9 @@ static void vision_prepare_target_control(const algo_vision_target_result_t *dis
      * 不把旧像素当成新控制观测。仅已有有效 control track 时才保留。 */
     if((display_result != 0U) && (display_result->hold_active != 0U))
     {
-        vision_target_control_pending_reset();
+        /* 单帧漏检的 hold 帧保留确认候选计数(位置真的变了由距离检查
+         * 重置), 否则"检出-漏检-检出"的弱信号永远凑不满确认帧数,
+         * 控制位置被冻结。 */
         use_measurement = 0U;
         if(s_target_control_valid != 0U)
         {
