@@ -515,7 +515,8 @@ static void helper_update_snapshot(const algo_vision_target_pipeline_result_t *t
         s_snapshot.vlamp_result = *v_result;
     }
 
-    if((b_result != 0) && (b_result->found != 0U))
+    if((b_result != 0) && (b_result->found != 0U)
+       && (b_result->hold_active == 0U))
     {
         s_snapshot.has_beacon = 1U;
         s_snapshot.beacon_x = helper_float_to_i16(b_result->center_x);
