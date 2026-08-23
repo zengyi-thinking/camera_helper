@@ -1,110 +1,134 @@
 # camera_helper
 
-Auxiliary camera board for side-view visual assistance. The board captures MT9V03X grayscale frames, detects both V-lamp and beacon targets, shows debug overlays on IPS200, and answers main-board UART6 requests.
+`flight_control` 的副摄视觉板工程。CM7_0持续采集MT9V03X灰度图，识别V型车灯与信标灯，并通过UART6向飞控返回V→B向量；CM7_1保留最小启动模板。
 
-## Hardware
+该工程用于补充主摄视野，不独立控制无人机或小车。主摄任务锁定和最终A4发布仍由飞控主板负责。
 
-- Camera: MT9V03X, same wiring as the `E8_camera` template.
-- Display: IPS200 SPI.
-- Main-board link: `UART_6`.
-- Pins: `TX=P03_1`, `RX=P03_0`.
-- Baud rate: `230400`.
+## 硬件与接线
 
-## Source Layout
+- MCU：Infineon CYT4BB7。
+- 摄像头：MT9V03X，当前按170度对角视场配置。
+- 显示：IPS200 SPI。
+- 主板通信：UART6，230400。
+- 副摄TX：`P03_1`，连接主板RX。
+- 副摄RX：`P03_0`，连接主板TX。
 
-- `code/application/camera_helper/app_camera_helper.*`: capture, display, UART request/response, V/B fusion.
-- `code/algorithm/vision/algo_vlamp.*`: V-lamp detection.
-- `code/algorithm/vision/algo_onelamp.*`: optional cable-occlusion-tolerant ONE-lamp detection.
-- `code/algorithm/vision/algo_beacon.*`: beacon detection.
-- `iar/build_only.bat`: build entry only.
+主板和副摄的TX/RX必须交叉连接，并共地。
 
-## Visual Flow
+## 工程结构
 
-Each camera frame runs in this order:
+```text
+code/application/camera_helper/  图像任务、显示、请求解析和响应发送
+code/algorithm/vision/           V灯、信标、活动检测和镜头几何算法
+code/hardware/                   视觉公共配置
+user/                            双核入口
+iar/                             IAR工程、构建和烧录脚本
+libraries/                       本工程实际使用的SDK与逐飞外设库
+```
 
-1. Run the same `algo_vision_target_pipeline_update()` Module used by `flight_control`.
-2. Detect the V-lamp with strict measurement, bright fallback, local recovery and short hold.
-3. Detect and filter up to three beacon candidates with the same V-lamp conflict policy.
-4. Use `target_control` and `beacon_publish` as the helper link result.
-5. If both published targets are valid, compute V-to-beacon deltas.
+副摄与主摄保留两份视觉算法源码，以便分别构建。修改 `code/algorithm/vision/` 后必须同步检查 `flight_control` 中的同名文件；公开发布前应确保两边只有明确记录的差异。
 
-`code/hardware/hw_config.h` uses `HW_VISION_TARGET_SHAPE_V`, matching the main
-camera. The algorithm source files in `code/algorithm/vision/` are synchronized
-with `flight_control`; do not tune one camera copy without synchronizing the
-other.
+## 视觉流程
 
-The display shows:
+每个摄像头帧按以下顺序处理：
 
-- Grayscale image using the same display window as `flight_control`: `x=4, y=54, w=232, h=266`.
-- Five-line top status bar with cached line redraw to reduce flicker.
-- Green V-lamp bbox/cross.
-- Red beacon bbox/cross.
-- Yellow line from V-lamp center to beacon center.
+1. 运行 `algo_vision_target_pipeline_update()`。
+2. 使用严格检测、亮区回退、局部恢复和短时保持识别V灯。
+3. 检测最多三个信标候选，并应用V灯冲突排除和活动证据。
+4. 对V灯与信标点分别做170度等距鱼眼几何校正。
+5. 计算副摄自身坐标中的V→B向量，再执行90度安装映射。
+6. 更新IPS200覆盖层和B2快照。
 
-The old auxiliary debug grid and mapped-axis overlay are intentionally disabled because they were redrawn over every grayscale refresh and made the image look like it was flashing.
+屏幕标记：绿色为V灯，红色为信标，黄色为V→B连线。
 
-## Coordinate Mapping
+## 坐标映射
 
-The auxiliary camera is treated as a counter-clockwise 90 degree rotated view relative to the main camera:
+副摄自身图像坐标为X向右、Y向下：
 
 ```c
-raw_vb_x = beacon_x - v_x;
-raw_vb_y = beacon_y - v_y;
-mapped_vb_x = -raw_vb_y;
-mapped_vb_y =  raw_vb_x;
+raw_dx = beacon_x - v_x;
+raw_dy = beacon_y - v_y;
 ```
 
-## UART Protocol
+当前副摄相对主摄按逆时针90度安装：
 
-Main-board request, 5 bytes:
+```c
+mapped_dx = -raw_dy;
+mapped_dy =  raw_dx;
+```
+
+镜头校正在副摄自身坐标中完成，飞控主板不得再次校正 `mapped_dx/mapped_dy`。
+
+## UART6协议
+
+主板请求B1，固定5字节：
 
 ```text
-B1 seq mode checksum 55
+0xB1 | seq | mode | XOR(0..2) | 0x55
 ```
 
-Auxiliary response, 27 bytes:
+副摄响应B2，固定27字节：
 
 ```text
-B2 seq flags vx vy bx by raw_dx raw_dy map_dx map_dy vconf bconf frame_id checksum 55
+0xB2 | seq | flags
+| V_x V_y | beacon_x beacon_y
+| raw_dx raw_dy | mapped_dx mapped_dy
+| V_conf | beacon_conf | frame_id
+| XOR(0..24) | 0x55
 ```
 
-Field encoding:
+除单字节字段外均为大端序；坐标和差值为有符号 `int16`，置信度和帧号为无符号 `uint16`。
 
-- `vx/vy/bx/by/raw_dx/raw_dy/map_dx/map_dy`: signed `int16`, big-endian.
-- `vconf/bconf/frame_id`: unsigned `uint16`, big-endian.
-- `checksum`: XOR from byte 0 through the last data byte.
+`flags`：
 
-Flags:
+| 位 | 名称 | 含义 |
+|---:|---|---|
+| 0 | `HAS_V` | V灯有效 |
+| 1 | `HAS_B` | 信标有效 |
+| 2 | `MOVE_VALID` | V灯与信标同时有效 |
+| 3 | `FRESH` | 快照未超过副摄新鲜窗口 |
+| 4 | `MAPPED_VALID` | 90度映射向量有效 |
 
-- `bit0 HAS_V`: V-lamp detected.
-- `bit1 HAS_B`: beacon detected.
-- `bit2 MOVE_VALID`: V-lamp and beacon are both valid.
-- `bit3 FRESH`: response data is recent.
-- `bit4 MAPPED_VALID`: mapped VB delta is valid.
+副摄收到合法B1后立即回传当前快照，同时保留低频心跳。飞控默认每20ms请求一次，220ms未收到有效响应则认为副摄链路失效。
 
-The main board requests this result as soon as either the main V-lamp or main
-beacon is not freshly visible. The existing safe-use rule remains: a helper
-beacon enters the main image frame only when the main V-lamp is available and
-the auxiliary response has `MOVE_VALID=1`, because the two cameras do not have
-an absolute extrinsic calibration.
+## 与飞控任务的边界
 
-## Timed Auto-Land Mission Compatibility
+- 副摄只返回当前确认的单个V灯和单个信标结果。
+- 主摄任务队列、B1锁定、主副摄选择和A4发布由 `flight_control` 管理。
+- 定时停车与Yaw任务由飞控CM7_1管理，副摄不单独计时。
+- B1/B2、共享内存或A4标志发生变化时，应使用同一发布版本的三个工程一起烧录。
 
-The helper now detects the same maximum of three beacon candidates as the main
-camera, while B1/B2 remains protocol-compatible and returns only the pipeline's
-single confirmed `beacon_publish` result. The main camera still owns mission
-queueing and target lock, while CM7_1 owns the timed landing sequence. During a
-live lock, helper data may only support the same mapped target, and it is not
-allowed to replace a target after the main mission enters its near/missing
-phase.
+## 构建
 
-Do not add B3, global target IDs, a lamp counter, or a second helper-side target to this mission version. All three devices still need the matching mission branch flashed because the flight controller shared-memory version and the car A4 flag behavior changed.
+工程已使用仓库内 `libraries/`，不再依赖相邻的 `E8_camera` 目录。
 
-## Build
+需要Windows和IAR Embedded Workbench for Arm 9.2系列。如果IAR不在 `PATH` 中：
 
 ```bat
-cd /d D:\CYT4BB7_Library\Example\Motherboard_Demo\camera_helper
-iar\build_only.bat
+set IAR_EW_ROOT=C:\path\to\Embedded Workbench 9.2
 ```
 
-Verified on `codex/timed-auto-land`: CM7_0 and CM7_1 both build with `0 errors / 0 warnings`.
+构建两个核心：
+
+```bat
+iar\build_all_cores.bat --no-pause
+```
+
+构建并烧录：
+
+```bat
+iar\download_all_cores.bat --no-pause
+```
+
+全新克隆第一次烧录前，需在IAR中分别打开 `iar/project_config/cyt4bb7_cm_7_0.eww` 和 `cyt4bb7_cm_7_1.eww`，选择正确调试器并让IAR生成本机C-SPY设置；这些个人设置不会提交到仓库。
+
+## 验证
+
+1. 遮挡/移开V灯和信标，确认屏幕标记与B2 flags一致。
+2. 连续发送B1，确认B2序号跟随且帧长度、校验稳定。
+3. 将信标分别移到V灯右、下、左、上，核对原始和90度映射向量。
+4. 在主摄短时失去信标时，确认飞控能快速使用副摄结果；主摄恢复后不得切换到错误信标。
+
+## 许可证状态
+
+`libraries/` 中的逐飞CYT4BB开源库声明采用GPL-3.0-or-later，SDK中还有各自许可证。公开发布前必须保留第三方声明并选择兼容的项目根许可证。详见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。

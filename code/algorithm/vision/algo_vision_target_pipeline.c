@@ -991,7 +991,7 @@ static uint8 vision_target_control_candidate_confirmed(const algo_vision_target_
 
     /* 确认以位置连续性为准, 检测来源(严格V/局部恢复/亮区回退)交替
      * 不再重置计数: 远距弱检测下来源逐帧交替曾把确认计数反复清零,
-     * 控制位置被冻结在旧值, 表现为对远处目标毫无追赶。 */
+     * 控制位置被冻结在旧值, 无人机表现为对远处目标毫无追赶。 */
     dx = result->center_x - s_target_control_pending.center_x;
     dy = result->center_y - s_target_control_pending.center_y;
     dist = sqrtf((dx * dx) + (dy * dy));
