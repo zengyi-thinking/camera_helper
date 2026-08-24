@@ -129,6 +129,16 @@ iar\download_all_cores.bat --no-pause
 3. 将信标分别移到V灯右、下、左、上，核对原始和90度映射向量。
 4. 在主摄短时失去信标时，确认飞控能快速使用副摄结果；主摄恢复后不得切换到错误信标。
 
+## AI协作：飞跃雷区 Skill
+
+仓库内置 [`feiyue-leiqu`](.agents/skills/feiyue-leiqu/SKILL.md)，用于主副摄视觉、飞控、小车和通讯的协同设计。在本仓库目录启动 Codex 后会自动发现，也可以显式输入：
+
+```text
+$feiyue-leiqu 提升远距信标识别，同时约束误检和主摄接管风险
+```
+
+三工程同处 `Motherboard_Demo` 时，共享规范源位于 `../.agents/skills/feiyue-leiqu`；本仓库副本用于独立克隆。共同视觉算法或 B1/B2 语义变化时，应同步 skill 并配套验证飞控端。
+
 ## 许可证
 
 本项目自研代码以 GNU General Public License v3.0 or later 发布，完整条款见 [`LICENSE`](LICENSE)。`libraries/` 中的第三方组件继续适用其各自的版权和许可证声明，详见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
